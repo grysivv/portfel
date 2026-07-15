@@ -388,7 +388,14 @@ async function refreshPrices(){
   await fetchFX();
   const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker.toUpperCase()))];
   await fetchTickers(tickers);
-  S.priceCache={prices,fx,ts:Date.now()};save();
+  // uzupełnij brakujące dane historyczne (od pierwszej transakcji do dziś) — tylko te, których nie mamy w cache
+  const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
+  if(events.length&&tickers.length){
+    try{await fetchHistoricalPrices(tickers,events[0].date,new Date().toISOString().slice(0,10));}
+    catch(e){console.warn("Hist",e);}
+  }
+  const historical=S.priceCache.historical||{};
+  S.priceCache={prices,fx,historical,ts:Date.now()};save();
   const n=Object.keys(prices).length;
   st.textContent="ceny: "+(n?("OK • "+new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})):"offline (cache)");
   st.className="pill "+(n?"ok":"warn");
@@ -562,7 +569,6 @@ function portfolioValueOnDate(date){
   return toBase(total);
 }
 
-let fetchingHistorical=false;
 function renderDashboard(){
   const P=positionsData();
   const total=P.reduce((s,p)=>s+(p.val||0),0);
@@ -581,18 +587,8 @@ function renderDashboard(){
   $("#d-taxSub").textContent="kapitałowe "+fmt(toBase(R.taxCap))+" + dyw./ods. "+fmt(toBase(R.taxDiv));
 
   // wykres czasu: kapitał zainwestowany narastająco + wartość historyczna + punkt wartości bieżącej
+  // dane historyczne czytamy wyłącznie ze zgromadzonego cache — pobiera je przycisk „Odśwież ceny”
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
-  if(events.length&&!fetchingHistorical){
-    fetchingHistorical=true;
-    const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker))];
-    if(tickers.length){
-      const firstDate=events[0].date;
-      const lastDate=events[events.length-1].date;
-      fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10))
-        .then(()=>{fetchingHistorical=false;renderDashboard();})
-        .catch(e=>{fetchingHistorical=false;console.warn("Hist",e);});
-    }
-  }
   let cum=0;const labels=[],data=[],histData=[];
   for(const t of events){
     const a=S.assets.find(x=>x.id===t.a);if(!a)continue;
