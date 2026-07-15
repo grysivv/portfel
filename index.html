@@ -112,9 +112,49 @@ dialog h3{font-size:16px;margin-bottom:14px}
 .view{display:none}.view.on{display:block}
 .src{font-size:10.5px;color:var(--ink3)}
 @media print{.side,.topbar button,.topbar select{display:none}.app{grid-template-columns:1fr}}
+#authGate{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}
+#authGate.hidden{display:none}
+.auth-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:32px;width:100%;max-width:400px;box-shadow:0 8px 40px rgba(0,0,0,.10)}
+.auth-brand{font-size:24px;font-weight:700;text-align:center;margin-bottom:6px;letter-spacing:.3px}
+.auth-brand span{display:block;font-size:11px;font-weight:400;color:var(--ink3);letter-spacing:.6px;text-transform:uppercase;margin-top:2px}
+.auth-sub{text-align:center;color:var(--ink2);font-size:13px;margin-bottom:22px}
+.auth-tabs{display:flex;gap:4px;background:var(--bg);border-radius:10px;padding:4px;margin-bottom:20px}
+.auth-tab{flex:1;background:none;border:0;color:var(--ink2);padding:9px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500}
+.auth-tab.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.10)}
+.auth-form{display:flex;flex-direction:column;gap:12px}
+.auth-form label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--ink2);font-weight:500}
+.auth-form input{width:100%;padding:10px 12px}
+.auth-form .btn.primary{margin-top:6px;padding:11px;font-size:14px}
+.auth-err{color:var(--red);font-size:12.5px;margin:0;line-height:1.4}
+.auth-err:empty{display:none}
+.auth-div{display:flex;align-items:center;gap:10px;color:var(--ink3);font-size:12px;margin:18px 0}
+.auth-div::before,.auth-div::after{content:"";flex:1;height:1px;background:var(--line)}
+#authGoogle{width:100%;padding:11px;font-size:14px}
+.auth-skip{display:block;width:100%;background:none;border:0;color:var(--ink3);font-size:12.5px;cursor:pointer;margin-top:16px;text-align:center}
+.auth-skip:hover{color:var(--ink2);text-decoration:underline}
 </style>
 </head>
 <body>
+<div id="authGate">
+  <div class="auth-card">
+    <div class="auth-brand">Portfel<span>monitor majątku</span></div>
+    <p class="auth-sub">Zaloguj się, aby synchronizować swój portfel w chmurze.</p>
+    <div class="auth-tabs">
+      <button class="auth-tab on" data-mode="login" type="button">Logowanie</button>
+      <button class="auth-tab" data-mode="register" type="button">Rejestracja</button>
+    </div>
+    <form class="auth-form" id="authForm">
+      <label>E-mail<input type="email" id="authEmail" autocomplete="email" placeholder="twoj@email.pl" required></label>
+      <label>Hasło<input type="password" id="authPass" autocomplete="current-password" placeholder="min. 6 znaków" minlength="6" required></label>
+      <label id="authPass2Wrap" style="display:none">Powtórz hasło<input type="password" id="authPass2" autocomplete="new-password" placeholder="powtórz hasło"></label>
+      <p class="auth-err" id="authErr"></p>
+      <button type="submit" class="btn primary" id="authSubmit">Zaloguj się</button>
+    </form>
+    <div class="auth-div"><span>lub</span></div>
+    <button class="btn" id="authGoogle" type="button">☁ Kontynuuj z Google</button>
+    <button class="auth-skip" id="authSkip" type="button">Kontynuuj bez konta (dane tylko w tej przeglądarce)</button>
+  </div>
+</div>
 <div class="app">
   <aside class="side">
     <div class="logo">Portfel<small>monitor majątku</small></div>
@@ -1114,12 +1154,55 @@ $("#wipeBtn").onclick=()=>{
   resetAllData();
 };
 $("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
-$("#cloudLoginBtn").onclick=()=>{
+/* ===== Uwierzytelnianie / ekran logowania ===== */
+let authMode="login", pendingLogin=false;
+function showGate(){const g=$("#authGate");if(g)g.classList.remove("hidden");}
+function hideGate(){const g=$("#authGate");if(g)g.classList.add("hidden");}
+function setAuthMode(m){
+  authMode=m;
+  document.querySelectorAll(".auth-tab").forEach(b=>b.classList.toggle("on",b.dataset.mode===m));
+  $("#authPass2Wrap").style.display=m==="register"?"":"none";
+  $("#authSubmit").textContent=m==="register"?"Zarejestruj się":"Zaloguj się";
+  $("#authPass").setAttribute("autocomplete",m==="register"?"new-password":"current-password");
+  $("#authErr").textContent="";
+}
+function showAuthErr(e){
+  const map={
+    "auth/invalid-email":"Nieprawidłowy adres e-mail.",
+    "auth/user-not-found":"Nie znaleziono konta dla tego adresu.",
+    "auth/wrong-password":"Nieprawidłowe hasło.",
+    "auth/invalid-credential":"Nieprawidłowy e-mail lub hasło.",
+    "auth/email-already-in-use":"Konto z tym adresem już istnieje — zaloguj się.",
+    "auth/weak-password":"Hasło musi mieć co najmniej 6 znaków.",
+    "auth/too-many-requests":"Zbyt wiele prób. Spróbuj ponownie później.",
+    "auth/popup-closed-by-user":"Okno logowania zostało zamknięte.",
+    "auth/network-request-failed":"Błąd połączenia sieciowego."
+  };
+  $("#authErr").textContent=map[e.code]||("Błąd: "+e.message);
+}
+function googleLogin(){
+  if(!auth){toast("Logowanie niedostępne");return;}
+  pendingLogin=true;
   const provider=new firebase.auth.GoogleAuthProvider();
-  auth.signInWithPopup(provider)
-    .then(result=>{currentUser=result.user;updateCloudUI();loadFromFirestore().then(loaded=>{if(loaded)toast("Dane załadowane z chmury");setupFirestoreListener();});toast("Zalogowano!");})
-    .catch(e=>{console.error("Auth error:",e.code,e.message);toast("Błąd: "+e.message);});
-};
+  auth.signInWithPopup(provider).catch(e=>{pendingLogin=false;showAuthErr(e);});
+}
+document.querySelectorAll(".auth-tab").forEach(b=>b.onclick=()=>setAuthMode(b.dataset.mode));
+$("#authGoogle").onclick=googleLogin;
+$("#authSkip").onclick=()=>{hideGate();toast("Pracujesz lokalnie — dane nie będą synchronizowane");};
+$("#authForm").addEventListener("submit",e=>{
+  e.preventDefault();
+  if(!auth){toast("Logowanie niedostępne");return;}
+  const email=$("#authEmail").value.trim(), pass=$("#authPass").value;
+  $("#authErr").textContent="";
+  pendingLogin=true;
+  if(authMode==="register"){
+    if(pass!==$("#authPass2").value){pendingLogin=false;$("#authErr").textContent="Hasła nie są takie same.";return;}
+    auth.createUserWithEmailAndPassword(email,pass).catch(e=>{pendingLogin=false;showAuthErr(e);});
+  }else{
+    auth.signInWithEmailAndPassword(email,pass).catch(e=>{pendingLogin=false;showAuthErr(e);});
+  }
+});
+$("#cloudLoginBtn").onclick=googleLogin;
 $("#cloudLogoutBtn").onclick=()=>{
   if(syncListener)syncListener();syncListener=null;
   auth.signOut().then(()=>{currentUser=null;updateCloudUI();toast("Wylogowano");})
@@ -1129,7 +1212,9 @@ function updateCloudUI(){
   const logged=!!currentUser;
   $("#cloudLoginBtn").style.display=logged?"none":"";
   $("#cloudLogoutBtn").style.display=logged?"":"none";
-  $("#cloudStatus").style.display=logged?"block":"none";
+  const st=$("#cloudStatus");
+  st.style.display=logged?"block":"none";
+  if(logged)st.textContent="Zalogowano jako "+(currentUser.email||"użytkownik")+". Dane synchronizują się automatycznie.";
 }
 $("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;save();setupAuto();};
 function renderCustomTypes(){
@@ -1162,7 +1247,25 @@ function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=se
 
 /* ================= START ================= */
 initFirebase();
-if(auth){auth.onAuthStateChanged(user=>{currentUser=user;updateCloudUI();if(user)setupFirestoreListener();});}
+if(auth){
+  auth.onAuthStateChanged(user=>{
+    currentUser=user;
+    updateCloudUI();
+    if(user){
+      hideGate();
+      loadFromFirestore().then(loaded=>{
+        if(loaded)renderAll();
+        if(pendingLogin)toast(loaded?"Zalogowano — dane załadowane z chmury":"Zalogowano!");
+        pendingLogin=false;
+        setupFirestoreListener();
+      });
+    }else{
+      showGate();
+    }
+  });
+}else{
+  hideGate(); // Firebase niedostępne — tryb wyłącznie lokalny
+}
 $("#baseCur").value=S.settings.base||"PLN";
 $("#taxMethod").value=S.settings.method||"FIFO";
 $("#autoRef").checked=!!S.settings.autoRef;
