@@ -237,6 +237,13 @@ dialog h3{font-size:16px;margin-bottom:14px}
         <label class="mini" style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="autoRef"> automatyczne odświeżanie co 10 minut
         </label>
+        <h3 style="margin:18px 0 12px">Kategorie aktywów</h3>
+        <div style="display:flex;gap:6px;margin-bottom:12px">
+          <input type="text" id="newTypeName" placeholder="nazwa kategorii" style="flex:1;max-width:200px">
+          <button class="btn primary" id="addTypeBtn" style="font-size:13px">+ Dodaj</button>
+        </div>
+        <div id="customTypesList" style="font-size:13px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        <p class="note">Dodaj własne kategorie aktywów. Domyślne kategorie zawsze będą dostępne.</p>
       </div>
     </section>
   </main>
@@ -287,12 +294,14 @@ dialog h3{font-size:16px;margin-bottom:14px}
 "use strict";
 /* ================= STAN ================= */
 const LS_KEY="portfel_v3";
-const TYPES={akcje_pl:"Akcje GPW",akcje_zagr:"Akcje zagr.",etf:"ETF",obligacja:"Obligacja",krypto:"Krypto",zloto:"Złoto",kolekcja:"Kolekcja"};
-const TAGCLS={akcje_pl:"",akcje_zagr:"",etf:"",obligacja:"ob",krypto:"kr",zloto:"zl",kolekcja:"ko"};
+const DEFAULT_TYPES={akcje_pl:"Akcje GPW",akcje_zagr:"Akcje zagr.",etf:"ETF",obligacja:"Obligacja",krypto:"Krypto",zloto:"Złoto",kolekcja:"Kolekcja"};
+const DEFAULT_TAGCLS={akcje_pl:"",akcje_zagr:"",etf:"",obligacja:"ob",krypto:"kr",zloto:"zl",kolekcja:"ko"};
 let S=load();
 let prices={};   // ticker -> {price, cur, ts, src}
 let fx={PLN:1};  // waluta -> kurs w PLN
 let charts={};
+function getTypes(){return {...DEFAULT_TYPES,...(S.settings.customTypes||{})};}
+function getTagCls(){return {...DEFAULT_TAGCLS,...(S.settings.customTagCls||{})}}
 
 function load(){
   try{const d=JSON.parse(localStorage.getItem(LS_KEY));if(d&&d.assets)return d;}catch(e){}
@@ -553,7 +562,7 @@ function portfolioValueOnDate(date){
   return toBase(total);
 }
 
-function renderDashboard(){
+async function renderDashboard(){
   const P=positionsData();
   const total=P.reduce((s,p)=>s+(p.val||0),0);
   const cost=P.reduce((s,p)=>s+(p.val!=null?p.cost:0),0);
@@ -574,9 +583,11 @@ function renderDashboard(){
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
   if(events.length){
     const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker))];
-    const firstDate=events[0].date;
-    const lastDate=events[events.length-1].date;
-    if(tickers.length)fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10)).catch(e=>console.warn("Hist",e));
+    if(tickers.length){
+      const firstDate=events[0].date;
+      const lastDate=events[events.length-1].date;
+      await fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10)).catch(e=>console.warn("Hist",e));
+    }
   }
   let cum=0;const labels=[],data=[],histData=[];
   for(const t of events){
@@ -600,7 +611,7 @@ function renderDashboard(){
 
   // alokacja
   const byType={};
-  P.forEach(p=>{if(p.val!=null)byType[TYPES[p.a.type]]=(byType[TYPES[p.a.type]]||0)+p.val;});
+  P.forEach(p=>{if(p.val!=null)byType[getTypes()[p.a.type]]=(byType[getTypes()[p.a.type]]||0)+p.val;});
   const cols=["#2a78d6","#008300","#eda100","#e87ba4","#1baf7a","#eb6834","#4a3aa7"];
   const keys=Object.keys(byType);
   drawChart("ch-alloc",{type:"doughnut",
@@ -650,7 +661,7 @@ function renderAssets(){
     const empty=p.qty<=1e-9;
     return `<tr>
       <td><b>${a.name}</b><br><span class="src">${a.ticker?a.ticker.toUpperCase()+" • ":""}${p.src}</span></td>
-      <td><span class="tag ${TAGCLS[a.type]}">${TYPES[a.type]}</span></td>
+      <td><span class="tag ${getTagCls()[a.type]}">${getTypes()[a.type]}</span></td>
       <td class="r num">${empty?"0":(p.qty%1?p.qty.toFixed(4):p.qty)}</td>
       <td class="r num">${empty?"—":fmt(p.avg,a.cur)}</td>
       <td class="r num">${p.price!=null?fmt(p.price,p.priceCur):"—"}</td>
@@ -791,8 +802,10 @@ let editingTxId=null;
 function openAssetDlg(a){
   editingId=a?a.id:null;
   $("#assetDlgTitle").textContent=a?"Edytuj aktywo":"Dodaj aktywo";
-  $("#a-name").value=a?a.name:"";
+  const types=getTypes();
+  $("#a-type").innerHTML=Object.entries(types).map(([k,v])=>`<option value="${k}">${v}</option>`).join("");
   $("#a-type").value=a?a.type:"akcje_pl";
+  $("#a-name").value=a?a.name:"";
   $("#a-cur").value=a?a.cur:"PLN";
   $("#a-ticker").value=a&&a.ticker?a.ticker:"";
   $("#a-manual").value=a&&a.manual!=null?a.manual:"";
@@ -852,9 +865,9 @@ function dl(name,content,mime){
   a.href=u;a.download=name;a.click();URL.revokeObjectURL(u);
 }
 
-function renderAll(){
+async function renderAll(){
   fillAssetSelects();fillYears();
-  renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
+  await renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
 }
 
 /* ================= ZDARZENIA ================= */
@@ -913,7 +926,7 @@ $("#taxCsvBtn").onclick=()=>{
 $("#expJson").onclick=()=>dl("portfel_backup_"+new Date().toISOString().slice(0,10)+".json",JSON.stringify(S,null,2),"application/json");
 $("#expCsv").onclick=()=>{
   let csv="nazwa;ticker;typ;waluta;ilosc;sr_cena;wartosc_"+S.settings.base+"\n";
-  positionsData().forEach(p=>{csv+=[p.a.name,p.a.ticker||"",TYPES[p.a.type],p.a.cur,p.qty,p.avg.toFixed(2),(p.val||0).toFixed(2)].join(";")+"\n";});
+  positionsData().forEach(p=>{csv+=[p.a.name,p.a.ticker||"",getTypes()[p.a.type],p.a.cur,p.qty,p.avg.toFixed(2),(p.val||0).toFixed(2)].join(";")+"\n";});
   dl("aktywa.csv","\ufeff"+csv,"text/csv");
 };
 $("#impJson").onclick=()=>{$("#fileInp").dataset.mode="json";$("#fileInp").click();};
@@ -958,6 +971,31 @@ $("#wipeBtn").onclick=()=>{
 };
 $("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
 $("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;save();setupAuto();};
+function renderCustomTypes(){
+  const custom=S.settings.customTypes||{};
+  const html=Object.entries(custom).map(([k,v])=>`
+    <div style="background:var(--line);padding:6px 8px;border-radius:6px;display:flex;align-items:center;gap:6px">
+      <span>${v}</span>
+      <button class="rowbtn del" onclick="delCustomType('${k}')" style="margin-left:4px">×</button>
+    </div>
+  `).join("");
+  $("#customTypesList").innerHTML=html||"<span style=\"color:var(--ink3)\">brak kategorii niestandardowych</span>";
+}
+window.delCustomType=k=>{
+  if(!confirm("Usunąć kategorię?"))return;
+  if(!S.settings.customTypes)S.settings.customTypes={};
+  delete S.settings.customTypes[k];
+  delete S.settings.customTagCls?.[k];
+  save();renderCustomTypes();toast("Usunięto kategorię");
+};
+$("#addTypeBtn").onclick=()=>{
+  const name=$("#newTypeName").value.trim();
+  if(!name){toast("Podaj nazwę kategorii");return;}
+  const key="custom_"+Date.now();
+  if(!S.settings.customTypes)S.settings.customTypes={};
+  S.settings.customTypes[key]=name;
+  save();$("#newTypeName").value="";renderCustomTypes();toast("Dodano kategorię");
+};
 let autoTimer=null;
 function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=setInterval(refreshPrices,10*60*1000);}
 
@@ -965,6 +1003,7 @@ function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=se
 $("#baseCur").value=S.settings.base||"PLN";
 $("#taxMethod").value=S.settings.method||"FIFO";
 $("#autoRef").checked=!!S.settings.autoRef;
+renderCustomTypes();
 restoreCache();
 renderAll();
 refreshPrices();
