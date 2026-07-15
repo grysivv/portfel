@@ -850,9 +850,23 @@ $("#fileInp").onchange=async e=>{
   }
   e.target.value="";
 };
+function resetAllData(){
+  S={
+    assets:[],
+    tx:[],
+    settings:{base:"PLN",method:"FIFO",autoRef:false},
+    priceCache:{}
+  };
+  prices={};
+  fx={PLN:1};
+  save();
+  restoreCache();
+  renderAll();
+  toast("Wszystkie dane zostały wyzerowane");
+}
 $("#wipeBtn").onclick=()=>{
   if(!confirm("Na pewno usunąć WSZYSTKIE dane? Tej operacji nie można cofnąć."))return;
-  S={assets:[],tx:[],settings:S.settings,priceCache:{}};save();renderAll();toast("Wyczyszczono");
+  resetAllData();
 };
 $("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
 $("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;save();setupAuto();};
