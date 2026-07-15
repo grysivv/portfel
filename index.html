@@ -610,7 +610,8 @@ function renderTx(){
       <td><span class="tag ${t.type==="sell"?"kr":t.type==="buy"?"":"ko"}">${TT[t.type]}</span></td>
       <td class="r num">${t.qty}</td><td class="r num">${fmt(+t.price,a.cur)}</td>
       <td class="r num">${fmt(+t.fee||0,a.cur)}</td><td class="r num">${fmt(val,a.cur)}</td>
-      <td class="r"><button class="rowbtn del" onclick="delTx('${t.id}')">usuń</button></td></tr>`;
+      <td class="r"><button class="rowbtn" onclick="editTx('${t.id}')">edytuj</button>
+      <button class="rowbtn del" onclick="delTx('${t.id}')">usuń</button></td></tr>`;
   }).join("");
 }
 
@@ -719,6 +720,7 @@ function simCost(aid,qty,method){
 
 /* ================= DIALOGI / CRUD ================= */
 let editingId=null;
+let editingTxId=null;
 function openAssetDlg(a){
   editingId=a?a.id:null;
   $("#assetDlgTitle").textContent=a?"Edytuj aktywo":"Dodaj aktywo";
@@ -748,6 +750,23 @@ window.quickPrice=id=>{
   const v=prompt("Bieżąca wycena 1 szt. ("+a.cur+") — "+a.name,a.manual||"");
   if(v===null)return;a.manual=v===""?null:+v;save();renderAll();toast("Zaktualizowano wycenę");
 };
+function openTxDlg(t){
+  editingTxId=t?t.id:null;
+  document.getElementById("txDlg").querySelector("h3").textContent=t?"Edytuj transakcję":"Dodaj transakcję";
+  if(t){
+    $("#t-asset").value=t.a;
+    $("#t-type").value=t.type;
+    $("#t-date").value=t.date;
+    $("#t-qty").value=t.qty;
+    $("#t-price").value=t.price;
+    $("#t-fee").value=t.fee||0;
+  }else{
+    $("#t-date").value=new Date().toISOString().slice(0,10);
+    $("#t-qty").value="";$("#t-price").value="";$("#t-fee").value="0";
+  }
+  document.getElementById("txDlg").showModal();
+}
+window.editTx=id=>{const t=S.tx.find(x=>x.id===id);if(t)openTxDlg(t);};
 window.delTx=id=>{if(!confirm("Usunąć transakcję?"))return;S.tx=S.tx.filter(t=>t.id!==id);save();renderAll();};
 
 function fillAssetSelects(){
@@ -799,15 +818,16 @@ $("#assetSave").onclick=()=>{
 };
 $("#addTxBtn").onclick=()=>{
   if(!S.assets.length){toast("Najpierw dodaj aktywo");return;}
-  $("#t-date").value=new Date().toISOString().slice(0,10);
-  document.getElementById("txDlg").showModal();
+  openTxDlg(null);
 };
 $("#txCancel").onclick=()=>document.getElementById("txDlg").close();
 $("#txSave").onclick=()=>{
-  const t={id:uid(),a:$("#t-asset").value,type:$("#t-type").value,date:$("#t-date").value,
+  const t={id:editingTxId||uid(),a:$("#t-asset").value,type:$("#t-type").value,date:$("#t-date").value,
     qty:+$("#t-qty").value||1,price:+$("#t-price").value||0,fee:+$("#t-fee").value||0};
   if(!t.date){toast("Podaj datę");return;}
-  S.tx.push(t);save();document.getElementById("txDlg").close();renderAll();toast("Dodano transakcję");
+  if(editingTxId){const i=S.tx.findIndex(x=>x.id===editingTxId);S.tx[i]=t;}
+  else S.tx.push(t);
+  save();document.getElementById("txDlg").close();renderAll();toast(editingTxId?"Zaktualizowano transakcję":"Dodano transakcję");
 };
 $("#taxYear").onchange=renderTax;$("#taxMethod").onchange=e=>{S.settings.method=e.target.value;save();renderAll();};
 $("#simBtn").onclick=runSim;
