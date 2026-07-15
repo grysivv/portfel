@@ -562,7 +562,8 @@ function portfolioValueOnDate(date){
   return toBase(total);
 }
 
-async function renderDashboard(){
+let fetchingHistorical=false;
+function renderDashboard(){
   const P=positionsData();
   const total=P.reduce((s,p)=>s+(p.val||0),0);
   const cost=P.reduce((s,p)=>s+(p.val!=null?p.cost:0),0);
@@ -581,12 +582,15 @@ async function renderDashboard(){
 
   // wykres czasu: kapitał zainwestowany narastająco + wartość historyczna + punkt wartości bieżącej
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
-  if(events.length){
+  if(events.length&&!fetchingHistorical){
+    fetchingHistorical=true;
     const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker))];
     if(tickers.length){
       const firstDate=events[0].date;
       const lastDate=events[events.length-1].date;
-      await fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10)).catch(e=>console.warn("Hist",e));
+      fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10))
+        .then(()=>{fetchingHistorical=false;renderDashboard();})
+        .catch(e=>{fetchingHistorical=false;console.warn("Hist",e);});
     }
   }
   let cum=0;const labels=[],data=[],histData=[];
@@ -865,9 +869,9 @@ function dl(name,content,mime){
   a.href=u;a.download=name;a.click();URL.revokeObjectURL(u);
 }
 
-async function renderAll(){
+function renderAll(){
   fillAssetSelects();fillYears();
-  await renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
+  renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
 }
 
 /* ================= ZDARZENIA ================= */
