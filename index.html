@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Portfel — monitor majątku</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
 <style>
 :root{
   --bg:#f4f4f0; --panel:#ffffff; --ink:#141613; --ink2:#5c5f58; --ink3:#8b8e85;
@@ -237,6 +240,12 @@ dialog h3{font-size:16px;margin-bottom:14px}
         <label class="mini" style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="autoRef"> automatyczne odświeżanie co 10 minut
         </label>
+        <h3 style="margin:18px 0 12px">Chmura</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="cloudLoginBtn">☁ Zaloguj się przez Google</button>
+          <button class="btn" id="cloudLogoutBtn" style="display:none">Wyloguj się</button>
+        </div>
+        <p class="note" id="cloudStatus" style="display:none">Zalogowany. Dane synchronizują się automatycznie.</p>
         <h3 style="margin:18px 0 12px">Kategorie aktywów</h3>
         <div style="display:flex;gap:6px;margin-bottom:12px">
           <input type="text" id="newTypeName" placeholder="nazwa kategorii" style="flex:1;max-width:200px">
@@ -292,6 +301,14 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
+/* ================= FIREBASE ================= */
+const firebaseConfig={apiKey:"AIzaSyB8yNsDXuI9xw6vgMkI1IbVJyZVtCMgbRc",authDomain:"portfel-e7e45.firebaseapp.com",projectId:"portfel-e7e45",storageBucket:"portfel-e7e45.firebasestorage.app",messagingSenderId:"447524551092",appId:"1:447524551092:web:a500cd4f3752641b995ae1"};
+firebase.initializeApp(firebaseConfig);
+const firestore=firebase.firestore();
+const auth=firebase.auth();
+let currentUser=null;
+let syncListener=null;
+
 /* ================= STAN ================= */
 const LS_KEY="portfel_v3";
 const DEFAULT_TYPES={akcje_pl:"Akcje GPW",akcje_zagr:"Akcje zagr.",etf:"ETF",obligacja:"Obligacja",krypto:"Krypto",zloto:"Złoto",kolekcja:"Kolekcja"};
@@ -307,7 +324,30 @@ function load(){
   try{const d=JSON.parse(localStorage.getItem(LS_KEY));if(d&&d.assets)return d;}catch(e){}
   return demoData();
 }
-function save(){localStorage.setItem(LS_KEY,JSON.stringify(S));}
+function save(){
+  localStorage.setItem(LS_KEY,JSON.stringify(S));
+  if(currentUser)syncDataToCloud().catch(e=>console.warn("Sync",e));
+}
+async function syncDataToCloud(){
+  if(!currentUser)return;
+  try{await firestore.collection("users").doc(currentUser.uid).set({data:S,lastSync:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});}
+  catch(e){console.warn("Cloud save",e);}
+}
+async function loadFromFirestore(){
+  if(!currentUser)return false;
+  try{const doc=await firestore.collection("users").doc(currentUser.uid).get();
+    if(doc.exists&&doc.data().data){S=doc.data().data;save();return true;}
+  }catch(e){console.warn("Cloud load",e);}
+  return false;
+}
+function setupFirestoreListener(){
+  if(!currentUser||syncListener)return;
+  syncListener=firestore.collection("users").doc(currentUser.uid).onSnapshot(doc=>{
+    if(doc.exists&&doc.data().data){const remoteData=doc.data().data;
+      if(JSON.stringify(remoteData)!==JSON.stringify(S)){S=remoteData;renderAll();}
+    }
+  },e=>console.warn("Listener",e));
+}
 function uid(){return Math.random().toString(36).slice(2,10);}
 function demoData(){
   const A=[
@@ -970,6 +1010,24 @@ $("#wipeBtn").onclick=()=>{
   resetAllData();
 };
 $("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
+$("#cloudLoginBtn").onclick=()=>{
+  const provider=new firebase.auth.GoogleAuthProvider();
+  auth.signInWithPopup(provider)
+    .then(result=>{currentUser=result.user;updateCloudUI();loadFromFirestore().then(loaded=>{if(loaded)toast("Dane załadowane z chmury");setupFirestoreListener();});})
+    .catch(e=>{console.error(e);toast("Błąd logowania");});
+};
+$("#cloudLogoutBtn").onclick=()=>{
+  if(syncListener)syncListener();syncListener=null;
+  auth.signOut().then(()=>{currentUser=null;updateCloudUI();toast("Wylogowano");})
+    .catch(e=>console.error(e));
+};
+function updateCloudUI(){
+  const logged=!!currentUser;
+  $("#cloudLoginBtn").style.display=logged?"none":"";
+  $("#cloudLogoutBtn").style.display=logged?"":"none";
+  $("#cloudStatus").style.display=logged?"block":"none";
+}
+auth.onAuthStateChanged(user=>{currentUser=user;updateCloudUI();if(user)setupFirestoreListener();});
 $("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;save();setupAuto();};
 function renderCustomTypes(){
   const custom=S.settings.customTypes||{};
