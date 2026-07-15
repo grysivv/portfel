@@ -482,7 +482,7 @@ function taxReport(year,method){
 const $=s=>document.querySelector(s);
 function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2200);}
 
-function positionsData(){
+function positionsData(includeEmpty){
   return S.assets.map(a=>{
     const L=computeLots(a.id);
     const q=assetPrice(a);
@@ -491,7 +491,7 @@ function positionsData(){
     const cost=conv(L.costBasis,a.cur);
     const gain=val!=null?val-cost:null;
     return {a,qty:L.qty,avg:L.avg,price:q.p,priceCur:q.cur,src:q.src,val,cost,gain,roi:(gain!=null&&cost>0)?gain/cost:null};
-  }).filter(p=>p.qty>1e-9);
+  }).filter(p=>includeEmpty||p.qty>1e-9);
 }
 
 function renderDashboard(){
@@ -575,20 +575,21 @@ function drawChart(id,cfg){
 }
 
 function renderAssets(){
-  const P=positionsData();
+  const P=positionsData(true);
   const tb=$("#assetRows");
   if(!P.length){tb.innerHTML=`<tr><td colspan="9"><div class="empty">Brak aktywów. Dodaj pierwsze lub załaduj portfel testowy w Ustawieniach.</div></td></tr>`;return;}
   tb.innerHTML=P.map(p=>{
     const a=p.a;
+    const empty=p.qty<=1e-9;
     return `<tr>
       <td><b>${a.name}</b><br><span class="src">${a.ticker?a.ticker.toUpperCase()+" • ":""}${p.src}</span></td>
       <td><span class="tag ${TAGCLS[a.type]}">${TYPES[a.type]}</span></td>
-      <td class="r num">${p.qty%1?p.qty.toFixed(4):p.qty}</td>
-      <td class="r num">${fmt(p.avg,a.cur)}</td>
+      <td class="r num">${empty?"0":(p.qty%1?p.qty.toFixed(4):p.qty)}</td>
+      <td class="r num">${empty?"—":fmt(p.avg,a.cur)}</td>
       <td class="r num">${p.price!=null?fmt(p.price,p.priceCur):"—"}</td>
-      <td class="r num"><b>${p.val!=null?fmt(p.val):"—"}</b></td>
-      <td class="r num ${p.gain>=0?"pos":"neg"}">${p.gain!=null?fmt(p.gain):"—"}</td>
-      <td class="r num ${p.roi>=0?"pos":"neg"}">${pct(p.roi)}</td>
+      <td class="r num"><b>${empty?`<span class="src">dodaj transakcję kupna</span>`:(p.val!=null?fmt(p.val):"—")}</b></td>
+      <td class="r num ${p.gain!=null&&p.gain>=0?"pos":"neg"}">${!empty&&p.gain!=null?fmt(p.gain):"—"}</td>
+      <td class="r num ${p.roi!=null&&p.roi>=0?"pos":"neg"}">${empty?"—":pct(p.roi)}</td>
       <td class="r">
         <button class="rowbtn" onclick="editAsset('${a.id}')">edytuj</button>
         <button class="rowbtn" onclick="quickPrice('${a.id}')">wycena</button>
