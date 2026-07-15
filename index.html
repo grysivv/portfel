@@ -41,6 +41,8 @@ body{background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"Segoe U
 .topbar h1{font-size:21px;font-weight:650}
 .topbar .grow{flex:1}
 .pill{font-size:12px;padding:4px 10px;border-radius:99px;border:1px solid var(--line2);color:var(--ink2)}
+.pill.busy{animation:pillPulse 1s ease-in-out infinite}
+@keyframes pillPulse{50%{opacity:.45}}
 .pill.ok{border-color:var(--green);color:var(--green);background:var(--green-bg)}
 .pill.warn{border-color:var(--gold);color:var(--gold);background:var(--gold-bg)}
 button.btn{background:var(--panel);border:1px solid var(--line2);color:var(--ink);padding:8px 14px;border-radius:8px;
@@ -187,6 +189,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
     <div class="topbar">
       <h1 id="viewTitle">Pulpit</h1>
       <div class="grow"></div>
+      <span class="pill" id="syncStatus" title="Status synchronizacji danych">dane: —</span>
       <span class="pill" id="pricesStatus">ceny: —</span>
       <select id="baseCur" title="Waluta bazowa">
         <option>PLN</option><option>EUR</option><option>USD</option><option>GBP</option><option>CHF</option>
@@ -431,29 +434,66 @@ function load(){
   try{const d=JSON.parse(localStorage.getItem(LS_KEY));if(d&&d.assets)return d;}catch(e){}
   return demoData();
 }
+/* ===== Status synchronizacji danych ===== */
+let syncResting={text:"dane: —",cls:""}, syncFlashTimer=null;
+function applySync(text,cls){
+  const el=document.getElementById("syncStatus");if(!el)return;
+  el.textContent=text;el.className="pill"+(cls?" "+cls:"");
+}
+function setSyncResting(text,cls){
+  syncResting={text:"dane: "+text,cls:cls||""};
+  clearTimeout(syncFlashTimer);
+  applySync(syncResting.text,syncResting.cls);
+}
+function busySync(text){clearTimeout(syncFlashTimer);applySync("dane: "+text,"busy");}
+function flashSync(text,cls,ms){
+  applySync("dane: "+text,cls||"");
+  clearTimeout(syncFlashTimer);
+  syncFlashTimer=setTimeout(()=>applySync(syncResting.text,syncResting.cls),ms||1800);
+}
+function histCount(){return S.priceCache&&S.priceCache.historical?Object.keys(S.priceCache.historical).length:0;}
+
 function save(){
   localStorage.setItem(LS_KEY,JSON.stringify(S));
   if(currentUser)syncDataToCloud().catch(e=>console.warn("Sync",e));
 }
 async function syncDataToCloud(){
   if(!currentUser)return;
-  try{await firestore.collection("users").doc(currentUser.uid).set({data:S,lastSync:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});}
-  catch(e){console.warn("Cloud save",e);}
+  busySync("zapisywanie w chmurze…");
+  try{
+    await firestore.collection("users").doc(currentUser.uid).set({data:S,lastSync:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});
+    const h=histCount();
+    setSyncResting("zsynchronizowane"+(h?" • historia: "+h:""),"ok");
+    flashSync("zapisano "+new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}),"ok");
+  }catch(e){console.warn("Cloud save",e);flashSync("błąd zapisu w chmurze","warn",3000);}
 }
 async function loadFromFirestore(){
   if(!currentUser)return false;
+  busySync("pobieram z chmury…");
   try{const doc=await firestore.collection("users").doc(currentUser.uid).get();
-    if(doc.exists&&doc.data().data){S=doc.data().data;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));return true;}
-  }catch(e){console.warn("Cloud load",e);}
+    if(doc.exists&&doc.data().data){
+      S=doc.data().data;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));
+      const fromCache=doc.metadata&&doc.metadata.fromCache, h=histCount();
+      setSyncResting((fromCache?"wczytane z cache (offline)":"wczytane z chmury")+(h?" • historia: "+h:""),"ok");
+      return true;
+    }
+    setSyncResting("brak danych w chmurze","warn");
+  }catch(e){console.warn("Cloud load",e);setSyncResting("błąd pobierania","warn");}
   return false;
 }
 function setupFirestoreListener(){
   if(!currentUser||syncListener)return;
   syncListener=firestore.collection("users").doc(currentUser.uid).onSnapshot(doc=>{
     if(doc.exists&&doc.data().data){const remoteData=doc.data().data;
-      if(JSON.stringify(remoteData)!==JSON.stringify(S)){S=remoteData;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));renderAll();}
+      const fromCache=doc.metadata&&doc.metadata.fromCache;
+      if(JSON.stringify(remoteData)!==JSON.stringify(S)){
+        S=remoteData;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));renderAll();
+        flashSync(fromCache?"zaktualizowano z cache":"zaktualizowano z chmury","ok");
+      }
+      const h=histCount();
+      setSyncResting("zsynchronizowane"+(fromCache?" (offline)":"")+(h?" • historia: "+h:""),"ok");
     }
-  },e=>console.warn("Listener",e));
+  },e=>{console.warn("Listener",e);setSyncResting("błąd synchronizacji","warn");});
 }
 function uid(){return Math.random().toString(36).slice(2,10);}
 function demoData(){
@@ -538,8 +578,10 @@ async function refreshPrices(){
   // uzupełnij brakujące dane historyczne (od pierwszej transakcji do dziś) — tylko te, których nie mamy w cache
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
   if(events.length&&tickers.length){
-    try{await fetchHistoricalPrices(tickers,events[0].date,new Date().toISOString().slice(0,10));}
-    catch(e){console.warn("Hist",e);}
+    busySync("ładowanie danych historycznych…");
+    try{await fetchHistoricalPrices(tickers,events[0].date,new Date().toISOString().slice(0,10));
+      flashSync("dane historyczne wczytane • serie: "+histCount(),"ok");
+    }catch(e){console.warn("Hist",e);flashSync("błąd danych historycznych","warn",3000);}
   }
   const historical=S.priceCache.historical||{};
   S.priceCache={prices,fx,historical,ts:Date.now()};save();
@@ -1326,13 +1368,15 @@ if(auth){
   auth.onAuthStateChanged(user=>{
     currentUser=user;
     updateCloudUI();
-    if(!user){hideVerify();showGate();return;}
-    if(needsVerify(user)){pendingLogin=false;showVerify(user);return;}
+    if(!user){hideVerify();showGate();setSyncResting("nie zalogowano","");return;}
+    if(needsVerify(user)){pendingLogin=false;showVerify(user);setSyncResting("oczekuje na weryfikację e-mail","warn");return;}
+    setSyncResting("logowanie…","");
     enterApp();
   });
 }else{
   // Firebase niedostępne — logowanie jest wymagane, więc zablokuj formularz z komunikatem
   showGate();
+  setSyncResting("synchronizacja niedostępna","warn");
   $("#authErr").textContent="Logowanie jest chwilowo niedostępne (brak połączenia z usługą). Odśwież stronę.";
   document.querySelectorAll("#authForm input,#authForm button,#authGoogle,#authForgot").forEach(el=>el.disabled=true);
 }
