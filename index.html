@@ -405,6 +405,13 @@ function initFirebase(){
     firebase.initializeApp(firebaseConfig);
     firestore=firebase.firestore();
     auth=firebase.auth();
+    // Lokalny cache offline — dane z chmury ładują się natychmiast, synchronizacja w tle.
+    // Włączane w osobnym bloku, aby ewentualny błąd nie zablokował logowania.
+    try{
+      if(firestore.enablePersistence)
+        firestore.enablePersistence({synchronizeTabs:true})
+          .catch(e=>console.warn("Firestore persistence niedostępna:",e.code||e));
+    }catch(e){console.warn("Firestore persistence niedostępna:",e);}
     console.log("Firebase initialized");
   }catch(e){console.error("Firebase init failed:",e);}
 }
@@ -436,7 +443,7 @@ async function syncDataToCloud(){
 async function loadFromFirestore(){
   if(!currentUser)return false;
   try{const doc=await firestore.collection("users").doc(currentUser.uid).get();
-    if(doc.exists&&doc.data().data){S=doc.data().data;save();return true;}
+    if(doc.exists&&doc.data().data){S=doc.data().data;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));return true;}
   }catch(e){console.warn("Cloud load",e);}
   return false;
 }
@@ -444,7 +451,7 @@ function setupFirestoreListener(){
   if(!currentUser||syncListener)return;
   syncListener=firestore.collection("users").doc(currentUser.uid).onSnapshot(doc=>{
     if(doc.exists&&doc.data().data){const remoteData=doc.data().data;
-      if(JSON.stringify(remoteData)!==JSON.stringify(S)){S=remoteData;renderAll();}
+      if(JSON.stringify(remoteData)!==JSON.stringify(S)){S=remoteData;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));renderAll();}
     }
   },e=>console.warn("Listener",e));
 }
@@ -1336,7 +1343,9 @@ renderCustomTypes();
 restoreCache();
 bindFilters();
 renderAll();
-refreshPrices();
+// Nie odświeżamy cen przy każdym starcie — pokazujemy je z cache.
+// Wyjątek: pierwsze uruchomienie bez żadnych zapisanych cen, gdy są aktywa z tickerem.
+if(!Object.keys(prices).length && S.assets.some(a=>a.ticker))refreshPrices();
 setupAuto();
 </script>
 </body>
