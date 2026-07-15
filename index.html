@@ -98,6 +98,14 @@ dialog h3{font-size:16px;margin-bottom:14px}
 .rowbtn{background:none;border:0;color:var(--accent);cursor:pointer;font-size:12.5px;padding:2px 4px}
 .rowbtn.del{color:var(--red)}
 .empty{padding:30px;text-align:center;color:var(--ink3);font-size:13.5px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
+.toolbar .field{display:flex;flex-direction:column;gap:4px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);font-weight:600}
+.toolbar .field select{min-width:140px}
+.toolbar .field.search{position:relative;flex:1;min-width:200px;max-width:340px}
+.toolbar .field.search .ico{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--ink3);font-size:15px;pointer-events:none}
+.toolbar .field.search input{width:100%;padding-left:32px}
+.toolbar .sortdir{padding:8px 12px;font-size:15px;line-height:1;min-width:40px}
+.toolbar .sortdir[data-dir="asc"]{color:var(--accent);border-color:var(--accent)}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);
   padding:10px 18px;border-radius:99px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:99}
 #toast.show{opacity:1}
@@ -159,6 +167,19 @@ dialog h3{font-size:16px;margin-bottom:14px}
         <button class="btn" id="csvAssetBtn">Import CSV</button>
         <span class="mini" style="align-self:center">CSV: nazwa;ticker;typ;waluta;ilość;cena_zakupu;data (średnik)</span>
       </div>
+      <div class="toolbar">
+        <div class="field search"><span class="ico">⌕</span><input type="search" id="assetSearch" placeholder="Szukaj aktywa lub tickera…"></div>
+        <label class="field"><span>Typ</span><select id="assetTypeFilter"><option value="">Wszystkie</option></select></label>
+        <label class="field"><span>Sortuj</span><select id="assetSort">
+          <option value="name">Nazwa</option>
+          <option value="type">Typ</option>
+          <option value="qty">Ilość</option>
+          <option value="val">Wartość</option>
+          <option value="gain">Zysk/strata</option>
+          <option value="roi">ROI</option>
+        </select></label>
+        <button class="sortdir btn" id="assetSortDir" data-dir="desc" title="Kierunek sortowania">↓</button>
+      </div>
       <table><thead><tr>
         <th>Aktywo</th><th>Typ</th><th class="r">Ilość</th><th class="r">Śr. cena zakupu</th>
         <th class="r">Cena bieżąca</th><th class="r">Wartość</th><th class="r">Zysk/strata</th><th class="r">ROI</th><th></th>
@@ -169,6 +190,25 @@ dialog h3{font-size:16px;margin-bottom:14px}
     <section class="view" id="v-tx">
       <div style="display:flex;gap:8px;margin-bottom:14px">
         <button class="btn primary" id="addTxBtn">+ Dodaj transakcję</button>
+      </div>
+      <div class="toolbar">
+        <div class="field search"><span class="ico">⌕</span><input type="search" id="txSearch" placeholder="Szukaj aktywa…"></div>
+        <label class="field"><span>Typ</span><select id="txTypeFilter">
+          <option value="">Wszystkie</option>
+          <option value="buy">Kupno</option>
+          <option value="sell">Sprzedaż</option>
+          <option value="dividend">Dywidenda</option>
+          <option value="interest">Odsetki</option>
+        </select></label>
+        <label class="field"><span>Aktywo</span><select id="txAssetFilter"><option value="">Wszystkie</option></select></label>
+        <label class="field"><span>Sortuj</span><select id="txSort">
+          <option value="date">Data</option>
+          <option value="name">Aktywo</option>
+          <option value="type">Typ</option>
+          <option value="qty">Ilość</option>
+          <option value="val">Wartość</option>
+        </select></label>
+        <button class="sortdir btn" id="txSortDir" data-dir="desc" title="Kierunek sortowania">↓</button>
       </div>
       <table><thead><tr>
         <th>Data</th><th>Aktywo</th><th>Typ</th><th class="r">Ilość</th><th class="r">Cena</th><th class="r">Prowizja</th><th class="r">Wartość</th><th></th>
@@ -698,9 +738,26 @@ function drawChart(id,cfg){
 }
 
 function renderAssets(){
-  const P=positionsData(true);
+  let P=positionsData(true);
   const tb=$("#assetRows");
   if(!P.length){tb.innerHTML=`<tr><td colspan="9"><div class="empty">Brak aktywów. Dodaj pierwsze lub załaduj portfel testowy w Ustawieniach.</div></td></tr>`;return;}
+  const types=getTypes();
+  const q=(($("#assetSearch")||{}).value||"").trim().toLowerCase();
+  const tf=($("#assetTypeFilter")||{}).value||"";
+  const sk=($("#assetSort")||{}).value||"name";
+  const dir=(($("#assetSortDir")||{}).dataset||{}).dir==="asc"?1:-1;
+  if(q)P=P.filter(p=>p.a.name.toLowerCase().includes(q)||(p.a.ticker||"").toLowerCase().includes(q));
+  if(tf)P=P.filter(p=>p.a.type===tf);
+  const key=p=>{switch(sk){
+    case"type":return types[p.a.type]||"";
+    case"qty":return p.qty||0;
+    case"val":return p.val||0;
+    case"gain":return p.gain!=null?p.gain:-Infinity;
+    case"roi":return p.roi!=null?p.roi:-Infinity;
+    default:return p.a.name.toLowerCase();
+  }};
+  P.sort((a,b)=>{const x=key(a),y=key(b);return (typeof x==="string"?x.localeCompare(y):x-y)*dir;});
+  if(!P.length){tb.innerHTML=`<tr><td colspan="9"><div class="empty">Brak aktywów spełniających kryteria.</div></td></tr>`;return;}
   tb.innerHTML=P.map(p=>{
     const a=p.a;
     const empty=p.qty<=1e-9;
@@ -723,9 +780,28 @@ function renderAssets(){
 
 function renderTx(){
   const tb=$("#txRows");
-  const rows=[...S.tx].sort((a,b)=>b.date.localeCompare(a.date));
-  if(!rows.length){tb.innerHTML=`<tr><td colspan="8"><div class="empty">Brak transakcji.</div></td></tr>`;return;}
   const TT={buy:"Kupno",sell:"Sprzedaż",dividend:"Dywidenda",interest:"Odsetki"};
+  const nameOf=t=>(S.assets.find(x=>x.id===t.a)||{name:"?"}).name;
+  const valOf=t=>(t.type==="dividend"||t.type==="interest")?+t.price*(+t.qty||1):+t.qty*+t.price;
+  let rows=[...S.tx];
+  if(!rows.length){tb.innerHTML=`<tr><td colspan="8"><div class="empty">Brak transakcji.</div></td></tr>`;return;}
+  const q=(($("#txSearch")||{}).value||"").trim().toLowerCase();
+  const tf=($("#txTypeFilter")||{}).value||"";
+  const af=($("#txAssetFilter")||{}).value||"";
+  const sk=($("#txSort")||{}).value||"date";
+  const dir=(($("#txSortDir")||{}).dataset||{}).dir==="asc"?1:-1;
+  if(q)rows=rows.filter(t=>nameOf(t).toLowerCase().includes(q));
+  if(tf)rows=rows.filter(t=>t.type===tf);
+  if(af)rows=rows.filter(t=>t.a===af);
+  const key=t=>{switch(sk){
+    case"name":return nameOf(t).toLowerCase();
+    case"type":return TT[t.type]||"";
+    case"qty":return +t.qty||0;
+    case"val":return valOf(t);
+    default:return t.date;
+  }};
+  rows.sort((a,b)=>{const x=key(a),y=key(b);return (typeof x==="string"?x.localeCompare(y):x-y)*dir;});
+  if(!rows.length){tb.innerHTML=`<tr><td colspan="8"><div class="empty">Brak transakcji spełniających kryteria.</div></td></tr>`;return;}
   tb.innerHTML=rows.map(t=>{
     const a=S.assets.find(x=>x.id===t.a)||{name:"?",cur:"PLN"};
     const val=(t.type==="dividend"||t.type==="interest")?+t.price*(+t.qty||1):+t.qty*+t.price;
@@ -897,6 +973,29 @@ window.delTx=id=>{if(!confirm("Usunąć transakcję?"))return;S.tx=S.tx.filter(t
 function fillAssetSelects(){
   const opts=S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
   $("#t-asset").innerHTML=opts;$("#simAsset").innerHTML=opts;
+  fillFilterSelects();
+}
+function fillFilterSelects(){
+  const types=getTypes();
+  const usedTypes=[...new Set(S.assets.map(a=>a.type))];
+  const tSel=$("#assetTypeFilter");
+  if(tSel){const cur=tSel.value;
+    tSel.innerHTML=`<option value="">Wszystkie</option>`+usedTypes.map(t=>`<option value="${t}">${types[t]||t}</option>`).join("");
+    tSel.value=cur;}
+  const aSel=$("#txAssetFilter");
+  if(aSel){const cur=aSel.value;
+    aSel.innerHTML=`<option value="">Wszystkie</option>`+S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
+    aSel.value=cur;}
+}
+function bindFilters(){
+  const aCtl=["assetSearch","assetTypeFilter","assetSort"];
+  aCtl.forEach(id=>{const el=$("#"+id);if(el)el.addEventListener("input",renderAssets);});
+  const tCtl=["txSearch","txTypeFilter","txAssetFilter","txSort"];
+  tCtl.forEach(id=>{const el=$("#"+id);if(el)el.addEventListener("input",renderTx);});
+  const ad=$("#assetSortDir");if(ad)ad.addEventListener("click",()=>{
+    const asc=ad.dataset.dir==="asc";ad.dataset.dir=asc?"desc":"asc";ad.textContent=asc?"↓":"↑";renderAssets();});
+  const td=$("#txSortDir");if(td)td.addEventListener("click",()=>{
+    const asc=td.dataset.dir==="asc";td.dataset.dir=asc?"desc":"asc";td.textContent=asc?"↓":"↑";renderTx();});
 }
 function fillYears(){
   const ys=new Set(S.tx.map(t=>+t.date.slice(0,4)));ys.add(new Date().getFullYear());
@@ -1069,6 +1168,7 @@ $("#taxMethod").value=S.settings.method||"FIFO";
 $("#autoRef").checked=!!S.settings.autoRef;
 renderCustomTypes();
 restoreCache();
+bindFilters();
 renderAll();
 refreshPrices();
 setupAuto();
