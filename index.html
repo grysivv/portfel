@@ -302,12 +302,17 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <script>
 "use strict";
 /* ================= FIREBASE ================= */
-const firebaseConfig={apiKey:"AIzaSyB8yNsDXuI9xw6vgMkI1IbVJyZVtCMgbRc",authDomain:"portfel-e7e45.firebaseapp.com",projectId:"portfel-e7e45",storageBucket:"portfel-e7e45.firebasestorage.app",messagingSenderId:"447524551092",appId:"1:447524551092:web:a500cd4f3752641b995ae1"};
-firebase.initializeApp(firebaseConfig);
-const firestore=firebase.firestore();
-const auth=firebase.auth();
-let currentUser=null;
-let syncListener=null;
+let firestore=null, auth=null, currentUser=null, syncListener=null;
+function initFirebase(){
+  if(!window.firebase){console.error("Firebase SDK not loaded");return;}
+  const firebaseConfig={apiKey:"AIzaSyB8yNsDXuI9xw6vgMkI1IbVJyZVtCMgbRc",authDomain:"portfel-e7e45.firebaseapp.com",projectId:"portfel-e7e45",storageBucket:"portfel-e7e45.firebasestorage.app",messagingSenderId:"447524551092",appId:"1:447524551092:web:a500cd4f3752641b995ae1"};
+  try{
+    firebase.initializeApp(firebaseConfig);
+    firestore=firebase.firestore();
+    auth=firebase.auth();
+    console.log("Firebase initialized");
+  }catch(e){console.error("Firebase init failed:",e);}
+}
 
 /* ================= STAN ================= */
 const LS_KEY="portfel_v3";
@@ -1058,6 +1063,7 @@ let autoTimer=null;
 function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=setInterval(refreshPrices,10*60*1000);}
 
 /* ================= START ================= */
+initFirebase();
 $("#baseCur").value=S.settings.base||"PLN";
 $("#taxMethod").value=S.settings.method||"FIFO";
 $("#autoRef").checked=!!S.settings.autoRef;
