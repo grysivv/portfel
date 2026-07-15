@@ -1013,8 +1013,8 @@ $("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast
 $("#cloudLoginBtn").onclick=()=>{
   const provider=new firebase.auth.GoogleAuthProvider();
   auth.signInWithPopup(provider)
-    .then(result=>{currentUser=result.user;updateCloudUI();loadFromFirestore().then(loaded=>{if(loaded)toast("Dane załadowane z chmury");setupFirestoreListener();});})
-    .catch(e=>{console.error(e);toast("Błąd logowania");});
+    .then(result=>{currentUser=result.user;updateCloudUI();loadFromFirestore().then(loaded=>{if(loaded)toast("Dane załadowane z chmury");setupFirestoreListener();});toast("Zalogowano!");})
+    .catch(e=>{console.error("Auth error:",e.code,e.message);toast("Błąd: "+e.message);});
 };
 $("#cloudLogoutBtn").onclick=()=>{
   if(syncListener)syncListener();syncListener=null;
