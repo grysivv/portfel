@@ -393,6 +393,49 @@ function restoreCache(){
       st.className="pill warn";}}
 }
 
+async function yahooHistorical(sym,start,end){
+  const s=Math.floor(new Date(start).getTime()/1000);
+  const e=Math.floor(new Date(end).getTime()/1000);
+  const url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?period1="+s+"&period2="+e+"&interval=1d";
+  try{
+    const txt=await tryProxy(url);
+    const d=JSON.parse(txt);
+    const res=d.chart&&d.chart.result&&d.chart.result[0];
+    if(!res)return [];
+    const stamps=res.timestamp||[];
+    const closes=res.indicators?.quote?.[0]?.close||[];
+    return stamps.map((ts,i)=>({date:new Date(ts*1000).toISOString().slice(0,10),price:closes[i]})).filter(x=>x.price!=null);
+  }catch(e){console.warn("Historical",sym,e);return [];}
+}
+
+async function fetchHistoricalPrices(tickers,startDate,endDate){
+  if(!S.priceCache.historical)S.priceCache.historical={};
+  const hist=S.priceCache.historical;
+  const toFetch=[];
+  for(const t of tickers){
+    const tu=t.toUpperCase();
+    if(!hist[tu])hist[tu]=[];
+    const cached=hist[tu];
+    const lastDate=cached.length?cached[cached.length-1].date:"";
+    if(!lastDate||lastDate<endDate)toFetch.push({t:tu,start:lastDate||startDate,end:endDate});
+  }
+  await Promise.all(toFetch.map(async({t,start,end})=>{
+    const data=await yahooHistorical(t,start,end);
+    hist[t]=[...hist[t].filter(x=>x.date<start),...data];
+  }));
+  save();
+}
+
+function getPriceOnDate(ticker,date){
+  const hist=S.priceCache.historical||{};
+  const tu=ticker.toUpperCase();
+  const data=hist[tu]||[];
+  const exact=data.find(x=>x.date===date);
+  if(exact&&exact.price!=null)return exact.price;
+  const before=data.filter(x=>x.date<=date).sort((a,b)=>b.date.localeCompare(a.date))[0];
+  return before?.price;
+}
+
 /* cena 1 szt. aktywa w jego walucie notowania */
 function assetPrice(a){
   if(a.type==="obligacja")return {p:bondUnitValue(a),cur:"PLN",src:"model"};
@@ -494,6 +537,22 @@ function positionsData(includeEmpty){
   }).filter(p=>includeEmpty||p.qty>1e-9);
 }
 
+function portfolioValueOnDate(date){
+  let total=0;
+  for(const a of S.assets){
+    const txBefore=txOf(a.id).filter(t=>t.date<=date);
+    let qty=0;
+    for(const t of txBefore){
+      if(t.type==="buy")qty+=+t.qty;
+      else if(t.type==="sell")qty-=+t.qty;
+    }
+    if(qty<=0)continue;
+    const price=a.ticker?getPriceOnDate(a.ticker,date):a.manual;
+    if(price!=null)total+=toPLN(qty*price,a.cur);
+  }
+  return toBase(total);
+}
+
 function renderDashboard(){
   const P=positionsData();
   const total=P.reduce((s,p)=>s+(p.val||0),0);
@@ -511,24 +570,32 @@ function renderDashboard(){
   $("#d-tax").textContent=fmt(toBase(R.total));
   $("#d-taxSub").textContent="kapitałowe "+fmt(toBase(R.taxCap))+" + dyw./ods. "+fmt(toBase(R.taxDiv));
 
-  // wykres czasu: kapitał zainwestowany narastająco + punkt wartości bieżącej
+  // wykres czasu: kapitał zainwestowany narastająco + wartość historyczna + punkt wartości bieżącej
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
-  let cum=0;const labels=[],data=[];
+  if(events.length){
+    const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker))];
+    const firstDate=events[0].date;
+    const lastDate=events[events.length-1].date;
+    if(tickers.length)fetchHistoricalPrices(tickers,firstDate,new Date().toISOString().slice(0,10)).catch(e=>console.warn("Hist",e));
+  }
+  let cum=0;const labels=[],data=[],histData=[];
   for(const t of events){
     const a=S.assets.find(x=>x.id===t.a);if(!a)continue;
     const v=toPLN(+t.qty*+t.price,a.cur);
     cum+=t.type==="buy"?v:-v;
     labels.push(t.date);data.push(toBase(cum));
+    histData.push(portfolioValueOnDate(t.date));
   }
-  labels.push("dziś");data.push(null);
+  labels.push("dziś");data.push(null);histData.push(total);
   const curLine=new Array(labels.length).fill(null);curLine[labels.length-1]=total;
   if(data.length>1)curLine[labels.length-2]=data[labels.length-2];
   drawChart("ch-time",{type:"line",
     data:{labels,datasets:[
       {label:"Kapitał zainwestowany",data,borderColor:"#0f4c81",backgroundColor:"rgba(15,76,129,.08)",fill:true,stepped:true,pointRadius:2,borderWidth:2},
+      {label:"Wartość historyczna",data:histData,borderColor:"#8a6d1a",backgroundColor:"transparent",pointRadius:2,borderWidth:2},
       {label:"Wartość bieżąca",data:curLine,borderColor:"#0f6e4f",borderDash:[5,4],pointRadius:5,pointBackgroundColor:"#0f6e4f",borderWidth:2}
     ]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:"bottom",labels:{boxWidth:12,boxHeight:2,font:{size:11}}}},
       scales:{y:{ticks:{callback:v=>Intl.NumberFormat("pl-PL",{notation:"compact"}).format(v)}}}}});
 
   // alokacja
