@@ -543,9 +543,34 @@ function conv(v,cur){return toBase(toPLN(v,cur));}
 
 /* ================= CENY (Yahoo Finance) ================= */
 async function fetchText(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.text();}
+// Kolejne warianty dostępu do zasobu: najpierw bezpośrednio, potem przez publiczne proxy CORS.
+// Wiele proxy w rezerwie, bo darmowe bywają chwilowo niedostępne lub ograniczają liczbę żądań.
+const PROXIES=[
+  u=>u,
+  u=>"https://corsproxy.io/?url="+encodeURIComponent(u),
+  u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
+  u=>"https://thingproxy.freeboard.io/fetch/"+u
+];
 async function tryProxy(url){
-  try{const r=await fetch(url);if(!r.ok)throw 0;return await r.text();}
-  catch(e){return await fetchText("https://api.allorigins.win/raw?url="+encodeURIComponent(url));}
+  let lastErr;
+  for(const mk of PROXIES){
+    try{
+      const r=await fetch(mk(url));
+      if(!r.ok)throw new Error("HTTP "+r.status);
+      const t=await r.text();
+      if(t&&t.trim())return t;
+      throw new Error("pusta odpowiedź");
+    }catch(e){lastErr=e;}
+  }
+  throw lastErr||new Error("wszystkie proxy zawiodły");
+}
+// Uruchamia zadania z ograniczoną współbieżnością, aby nie przeciążać proxy (rate-limit).
+async function runPool(items,worker,limit){
+  const arr=[...items];let i=0;
+  const runners=Array.from({length:Math.min(limit,arr.length||1)},async()=>{
+    while(i<arr.length){const idx=i++;await worker(arr[idx]);}
+  });
+  await Promise.all(runners);
 }
 async function yahooQuote(sym){
   const url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?range=1d&interval=1d";
@@ -557,24 +582,28 @@ async function yahooQuote(sym){
 }
 async function fetchFX(){
   const pairs={USD:"USDPLN=X",EUR:"EURPLN=X",GBP:"GBPPLN=X",CHF:"CHFPLN=X"};
-  await Promise.all(Object.entries(pairs).map(async([code,sym])=>{
+  await runPool(Object.entries(pairs),async([code,sym])=>{
     try{const q=await yahooQuote(sym);if(q.price)fx[code]=q.price;}catch(e){console.warn("FX",code,e);}
-  }));
+  },3);
   fx.PLN=1;
 }
+// Zwraca liczbę nieudanych pobrań (aby pokazać, czy komplet cen się załadował).
 async function fetchTickers(tickers){
-  await Promise.all(tickers.map(async t=>{
+  let failed=0;
+  await runPool(tickers,async t=>{
     try{const q=await yahooQuote(t);
       if(q.price!=null)prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};
-    }catch(e){console.warn("Yahoo",t,e);}
-  }));
+      else failed++;
+    }catch(e){failed++;console.warn("Yahoo",t,e);}
+  },3);
+  return failed;
 }
 async function refreshPrices(){
   const st=document.getElementById("pricesStatus");
   st.textContent="ceny: pobieram…";st.className="pill";
   await fetchFX();
   const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker.toUpperCase()))];
-  await fetchTickers(tickers);
+  const failed=await fetchTickers(tickers);
   // uzupełnij brakujące dane historyczne (od pierwszej transakcji do dziś) — tylko te, których nie mamy w cache
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
   if(events.length&&tickers.length){
@@ -585,9 +614,12 @@ async function refreshPrices(){
   }
   const historical=S.priceCache.historical||{};
   S.priceCache={prices,fx,historical,ts:Date.now()};save();
-  const n=Object.keys(prices).length;
-  st.textContent="ceny: "+(n?("OK • "+new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})):"offline (cache)");
-  st.className="pill "+(n?"ok":"warn");
+  const time=new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"});
+  const total=tickers.length, ok=total-failed;
+  if(!total){st.textContent="ceny: brak tickerów";st.className="pill";}
+  else if(failed){st.textContent="ceny: "+ok+"/"+total+" • "+time;st.className="pill warn";
+    st.title="Nie udało się pobrać "+failed+" z "+total+" cen. Kliknij, aby spróbować ponownie.";}
+  else{st.textContent="ceny: OK • "+time;st.className="pill ok";st.title="Wszystkie ceny pobrane.";}
   renderAll();
 }
 function restoreCache(){
@@ -624,10 +656,11 @@ async function fetchHistoricalPrices(tickers,startDate,endDate){
     const lastDate=cached.length?cached[cached.length-1].date:"";
     if(!lastDate||lastDate<endDate)toFetch.push({t:tu,start:lastDate||startDate,end:endDate});
   }
-  await Promise.all(toFetch.map(async({t,start,end})=>{
-    const data=await yahooHistorical(t,start,end);
-    hist[t]=[...hist[t].filter(x=>x.date<start),...data];
-  }));
+  await runPool(toFetch,async({t,start,end})=>{
+    try{const data=await yahooHistorical(t,start,end);
+      if(data.length)hist[t]=[...hist[t].filter(x=>x.date<start),...data];
+    }catch(e){console.warn("Hist",t,e);}
+  },3);
   save();
 }
 
@@ -1127,6 +1160,8 @@ document.getElementById("nav").addEventListener("click",e=>{
   $("#viewTitle").textContent=b.textContent.replace(/^..\s?/,"").trim();
 });
 $("#refreshBtn").onclick=refreshPrices;
+$("#pricesStatus").style.cursor="pointer";
+$("#pricesStatus").onclick=refreshPrices;
 $("#baseCur").onchange=e=>{S.settings.base=e.target.value;save();renderAll();};
 $("#a-type").onchange=toggleBondFields;
 $("#addAssetBtn").onclick=()=>openAssetDlg(null);
