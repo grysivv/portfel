@@ -132,13 +132,18 @@ dialog h3{font-size:16px;margin-bottom:14px}
 #authGoogle{width:100%;padding:11px;font-size:14px}
 .auth-skip{display:block;width:100%;background:none;border:0;color:var(--ink3);font-size:12.5px;cursor:pointer;margin-top:16px;text-align:center}
 .auth-skip:hover{color:var(--ink2);text-decoration:underline}
+.auth-forgot{align-self:flex-start;background:none;border:0;color:var(--accent);font-size:12.5px;cursor:pointer;padding:0;margin-top:-4px}
+.auth-forgot:hover{text-decoration:underline}
+.auth-icon{font-size:40px;text-align:center;margin-bottom:8px}
+.auth-msg{text-align:center;color:var(--ink2);font-size:13px;line-height:1.55;margin-bottom:16px}
+#authVerify .btn{width:100%;padding:11px;font-size:14px;margin-bottom:10px}
 </style>
 </head>
 <body>
 <div id="authGate">
-  <div class="auth-card">
+  <div class="auth-card" id="authMain">
     <div class="auth-brand">Portfel<span>monitor majątku</span></div>
-    <p class="auth-sub">Zaloguj się, aby synchronizować swój portfel w chmurze.</p>
+    <p class="auth-sub">Zaloguj się, aby korzystać z aplikacji i synchronizować portfel.</p>
     <div class="auth-tabs">
       <button class="auth-tab on" data-mode="login" type="button">Logowanie</button>
       <button class="auth-tab" data-mode="register" type="button">Rejestracja</button>
@@ -147,12 +152,22 @@ dialog h3{font-size:16px;margin-bottom:14px}
       <label>E-mail<input type="email" id="authEmail" autocomplete="email" placeholder="twoj@email.pl" required></label>
       <label>Hasło<input type="password" id="authPass" autocomplete="current-password" placeholder="min. 6 znaków" minlength="6" required></label>
       <label id="authPass2Wrap" style="display:none">Powtórz hasło<input type="password" id="authPass2" autocomplete="new-password" placeholder="powtórz hasło"></label>
+      <button type="button" class="auth-forgot" id="authForgot">Nie pamiętasz hasła?</button>
       <p class="auth-err" id="authErr"></p>
       <button type="submit" class="btn primary" id="authSubmit">Zaloguj się</button>
     </form>
     <div class="auth-div"><span>lub</span></div>
     <button class="btn" id="authGoogle" type="button">☁ Kontynuuj z Google</button>
-    <button class="auth-skip" id="authSkip" type="button">Kontynuuj bez konta (dane tylko w tej przeglądarce)</button>
+  </div>
+  <div class="auth-card" id="authVerify" style="display:none">
+    <div class="auth-brand">Portfel<span>monitor majątku</span></div>
+    <div class="auth-icon">✉</div>
+    <p class="auth-sub">Potwierdź swój adres e-mail</p>
+    <p class="auth-msg">Wysłaliśmy link weryfikacyjny na <b id="verifyEmail"></b>. Otwórz go, a następnie kliknij „Sprawdziłem”.</p>
+    <p class="auth-err" id="verifyErr"></p>
+    <button class="btn primary" id="verifyRefresh" type="button">Sprawdziłem — kontynuuj</button>
+    <button class="btn" id="verifyResend" type="button">Wyślij link ponownie</button>
+    <button class="auth-skip" id="verifyLogout" type="button">Wyloguj się</button>
   </div>
 </div>
 <div class="app">
@@ -1162,9 +1177,33 @@ function setAuthMode(m){
   authMode=m;
   document.querySelectorAll(".auth-tab").forEach(b=>b.classList.toggle("on",b.dataset.mode===m));
   $("#authPass2Wrap").style.display=m==="register"?"":"none";
+  $("#authForgot").style.display=m==="register"?"none":"";
   $("#authSubmit").textContent=m==="register"?"Zarejestruj się":"Zaloguj się";
   $("#authPass").setAttribute("autocomplete",m==="register"?"new-password":"current-password");
   $("#authErr").textContent="";
+}
+function showVerify(user){
+  $("#verifyErr").textContent="";
+  $("#verifyEmail").textContent=user.email||"";
+  $("#authMain").style.display="none";
+  $("#authVerify").style.display="";
+  showGate();
+}
+function hideVerify(){
+  $("#authVerify").style.display="none";
+  $("#authMain").style.display="";
+}
+function needsVerify(user){
+  return user.providerData.some(p=>p.providerId==="password") && !user.emailVerified;
+}
+function enterApp(){
+  hideVerify();hideGate();
+  loadFromFirestore().then(ok=>{
+    if(ok)renderAll();
+    if(pendingLogin)toast(ok?"Zalogowano — dane załadowane z chmury":"Zalogowano!");
+    pendingLogin=false;
+    setupFirestoreListener();
+  });
 }
 function showAuthErr(e){
   const map={
@@ -1188,7 +1227,6 @@ function googleLogin(){
 }
 document.querySelectorAll(".auth-tab").forEach(b=>b.onclick=()=>setAuthMode(b.dataset.mode));
 $("#authGoogle").onclick=googleLogin;
-$("#authSkip").onclick=()=>{hideGate();toast("Pracujesz lokalnie — dane nie będą synchronizowane");};
 $("#authForm").addEventListener("submit",e=>{
   e.preventDefault();
   if(!auth){toast("Logowanie niedostępne");return;}
@@ -1197,11 +1235,41 @@ $("#authForm").addEventListener("submit",e=>{
   pendingLogin=true;
   if(authMode==="register"){
     if(pass!==$("#authPass2").value){pendingLogin=false;$("#authErr").textContent="Hasła nie są takie same.";return;}
-    auth.createUserWithEmailAndPassword(email,pass).catch(e=>{pendingLogin=false;showAuthErr(e);});
+    auth.createUserWithEmailAndPassword(email,pass).then(cred=>{
+      cred.user.sendEmailVerification().catch(err=>console.warn("Verify email",err));
+      toast("Konto utworzone — wysłaliśmy link weryfikacyjny");
+    }).catch(e=>{pendingLogin=false;showAuthErr(e);});
   }else{
     auth.signInWithEmailAndPassword(email,pass).catch(e=>{pendingLogin=false;showAuthErr(e);});
   }
 });
+$("#authForgot").onclick=()=>{
+  if(!auth)return;
+  const email=$("#authEmail").value.trim();
+  if(!email){$("#authErr").textContent="Wpisz adres e-mail, aby zresetować hasło.";$("#authEmail").focus();return;}
+  auth.sendPasswordResetEmail(email)
+    .then(()=>{$("#authErr").textContent="";toast("Wysłano link do zresetowania hasła na "+email);})
+    .catch(showAuthErr);
+};
+$("#verifyResend").onclick=()=>{
+  if(!currentUser)return;
+  $("#verifyErr").textContent="";
+  currentUser.sendEmailVerification()
+    .then(()=>toast("Link weryfikacyjny wysłany ponownie"))
+    .catch(e=>{$("#verifyErr").textContent=e.code==="auth/too-many-requests"?"Zbyt wiele prób — odczekaj chwilę.":("Błąd: "+e.message);});
+};
+$("#verifyRefresh").onclick=()=>{
+  if(!currentUser)return;
+  $("#verifyErr").textContent="";
+  currentUser.reload().then(()=>{
+    if(currentUser.emailVerified){pendingLogin=true;enterApp();}
+    else $("#verifyErr").textContent="Adres nie został jeszcze potwierdzony. Sprawdź skrzynkę (także spam).";
+  }).catch(e=>{$("#verifyErr").textContent="Błąd: "+e.message;});
+};
+$("#verifyLogout").onclick=()=>{
+  if(syncListener)syncListener();syncListener=null;
+  auth.signOut().then(()=>{currentUser=null;hideVerify();showGate();}).catch(e=>console.error(e));
+};
 $("#cloudLoginBtn").onclick=googleLogin;
 $("#cloudLogoutBtn").onclick=()=>{
   if(syncListener)syncListener();syncListener=null;
@@ -1251,20 +1319,15 @@ if(auth){
   auth.onAuthStateChanged(user=>{
     currentUser=user;
     updateCloudUI();
-    if(user){
-      hideGate();
-      loadFromFirestore().then(loaded=>{
-        if(loaded)renderAll();
-        if(pendingLogin)toast(loaded?"Zalogowano — dane załadowane z chmury":"Zalogowano!");
-        pendingLogin=false;
-        setupFirestoreListener();
-      });
-    }else{
-      showGate();
-    }
+    if(!user){hideVerify();showGate();return;}
+    if(needsVerify(user)){pendingLogin=false;showVerify(user);return;}
+    enterApp();
   });
 }else{
-  hideGate(); // Firebase niedostępne — tryb wyłącznie lokalny
+  // Firebase niedostępne — logowanie jest wymagane, więc zablokuj formularz z komunikatem
+  showGate();
+  $("#authErr").textContent="Logowanie jest chwilowo niedostępne (brak połączenia z usługą). Odśwież stronę.";
+  document.querySelectorAll("#authForm input,#authForm button,#authGoogle,#authForgot").forEach(el=>el.disabled=true);
 }
 $("#baseCur").value=S.settings.base||"PLN";
 $("#taxMethod").value=S.settings.method||"FIFO";
