@@ -123,6 +123,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 .auth-tabs{display:flex;gap:4px;background:var(--bg);border-radius:10px;padding:4px;margin-bottom:20px}
 .auth-tab{flex:1;background:none;border:0;color:var(--ink2);padding:9px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500}
 .auth-tab.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.10)}
+.diagpre{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--ink2);max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .auth-form{display:flex;flex-direction:column;gap:12px}
 .auth-form label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--ink2);font-weight:500}
 .auth-form input{width:100%;padding:10px 12px}
@@ -181,6 +182,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
       <button data-v="tx">⇄ Transakcje</button>
       <button data-v="bonds">▤ Obligacje</button>
       <button data-v="tax">% Podatki</button>
+      <button data-v="diag">◔ Diagnostyka</button>
       <button data-v="set">⚙ Ustawienia</button>
     </nav>
     <div class="foot">Dane przechowywane lokalnie w tej przeglądarce.<br><br>Aplikacja ma charakter poglądowy — nie stanowi porady podatkowej ani inwestycyjnej.</div>
@@ -320,6 +322,26 @@ dialog h3{font-size:16px;margin-bottom:14px}
         <p class="note" id="simNote" style="display:none"></p>
       </div>
       <p class="note">Uwaga: w Polsce dla papierów wartościowych obowiązuje metoda FIFO (art. 30a/30b ustawy o PIT, art. 24 ust. 10). LIFO i średnia cena służą tu wyłącznie do porównania. Straty kapitałowe można rozliczać z zyskami kapitałowymi (PIT-38), ale nie z dywidendami. Dywidendy z zagranicy mogą podlegać podatkowi u źródła — sprawdź umowę o unikaniu podwójnego opodatkowania. To narzędzie poglądowe, nie porada podatkowa.</p>
+    </section>
+
+    <section class="view" id="v-diag">
+      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+        <button class="btn" id="diagReload">↻ Odśwież widok</button>
+        <button class="btn" id="diagPull">⬇ Pobierz z chmury</button>
+        <button class="btn" id="diagPush">⬆ Zapisz do chmury</button>
+        <button class="btn" id="diagPrices">$ Odśwież ceny</button>
+        <button class="btn" id="diagCopy">⧉ Kopiuj dane z chmury (JSON)</button>
+      </div>
+      <div class="grid cards4" id="diagCards"></div>
+      <h2 class="sec">Cache cen — lokalnie vs chmura</h2>
+      <div style="overflow-x:auto"><table><thead><tr>
+        <th>Ticker</th><th class="r">Cena (lokalnie)</th><th>Waluta</th><th class="r">Wiek lokalny</th><th class="r">Cena (chmura)</th><th class="r">Seria hist.</th>
+      </tr></thead><tbody id="diagPriceRows"></tbody></table></div>
+      <h2 class="sec">Surowe dane z chmury (Firestore)</h2>
+      <p class="note" id="diagCloudMeta">—</p>
+      <pre class="diagpre" id="diagCloud">—</pre>
+      <h2 class="sec">Surowe dane lokalne (localStorage)</h2>
+      <pre class="diagpre" id="diagLocal">—</pre>
     </section>
 
     <section class="view" id="v-set">
@@ -1238,6 +1260,81 @@ function renderAll(){
   renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
 }
 
+/* ================= DIAGNOSTYKA ================= */
+let diagCloudData=null;
+function ageStr(ts){
+  if(!ts)return "—";
+  const s=Math.round((Date.now()-ts)/1000);
+  if(s<60)return s+" s";
+  if(s<3600)return Math.round(s/60)+" min";
+  if(s<86400)return Math.round(s/3600)+" h";
+  return Math.round(s/86400)+" dni";
+}
+function diagCard(lbl,val,sub,cls){
+  return `<div class="card"><div class="lbl">${lbl}</div><div class="val num ${cls||""}" style="font-size:18px">${val}</div>${sub?`<div class="sub">${sub}</div>`:""}</div>`;
+}
+async function renderDiag(){
+  const localPC=S.priceCache||{}, localPrices=localPC.prices||{};
+  // Konto / sesja
+  const acc=currentUser?`${currentUser.email||"—"}`:"niezalogowany";
+  const verified=currentUser?(currentUser.emailVerified?"tak":"NIE"):"—";
+  const listener=syncListener?"aktywny":"nieaktywny";
+  // Pobierz aktualny dokument z chmury
+  let cloudMeta="—";
+  diagCloudData=null;
+  if(currentUser&&firestore){
+    try{
+      const doc=await firestore.collection("users").doc(currentUser.uid).get();
+      if(doc.exists){diagCloudData=doc.data().data||null;
+        const fromCache=doc.metadata&&doc.metadata.fromCache;
+        cloudMeta=`Dokument istnieje • źródło: ${fromCache?"lokalny cache Firestore (offline)":"serwer"} • lastSync w polu metadanych`;
+      }else cloudMeta="Dokument użytkownika nie istnieje w Firestore.";
+    }catch(e){cloudMeta="Błąd pobierania: "+e.message;}
+  }else cloudMeta="Brak zalogowanego użytkownika — dane trzymane tylko lokalnie.";
+  const cloudPC=(diagCloudData&&diagCloudData.priceCache)||{}, cloudPrices=cloudPC.prices||{};
+
+  const localN=Object.keys(localPrices).length, cloudN=Object.keys(cloudPrices).length;
+  const match=diagCloudData?(userFingerprint(S)===userFingerprint(diagCloudData)?"zgodne":"różnią się"):"—";
+  const cards=[
+    diagCard("Konto",acc,"weryfikacja e-mail: "+verified),
+    diagCard("Nasłuch chmury",listener,"synchronizacja na żywo"),
+    diagCard("Cache cen (lokalnie)",localN+" notowań","wiek: "+ageStr(localPC.ts)+" • zapis: "+(localPC.ts?new Date(localPC.ts).toLocaleString("pl-PL"):"—")),
+    diagCard("Cache cen (chmura)",cloudN+" notowań","wiek: "+ageStr(cloudPC.ts),cloudN<localN?"neg":""),
+    diagCard("Dane użytkownika",match,"lokalne vs chmura",match==="różnią się"?"neg":(match==="zgodne"?"pos":"")),
+    diagCard("Serie historyczne",Object.keys(localPC.historical||{}).length+" lok. / "+Object.keys(cloudPC.historical||{}).length+" chmura",""),
+  ].join("");
+  $("#diagCards").innerHTML=cards;
+
+  // Tabela cen
+  const tickers=[...new Set([...Object.keys(localPrices),...Object.keys(cloudPrices)])].sort();
+  const hist=localPC.historical||{};
+  $("#diagPriceRows").innerHTML=tickers.length?tickers.map(t=>{
+    const lp=localPrices[t], cp=cloudPrices[t];
+    return `<tr>
+      <td><b>${t}</b></td>
+      <td class="r num">${lp?lp.price:"—"}</td>
+      <td>${lp?lp.cur:"—"}</td>
+      <td class="r num">${lp?ageStr(lp.ts):"—"}</td>
+      <td class="r num ${cp&&lp&&cp.price!==lp.price?"neg":""}">${cp?cp.price:"—"}</td>
+      <td class="r num">${(hist[t]||[]).length}</td>
+    </tr>`;
+  }).join(""):`<tr><td colspan="6"><div class="empty">Brak cen w cache. Kliknij „Odśwież ceny”.</div></td></tr>`;
+
+  $("#diagCloudMeta").textContent=cloudMeta;
+  $("#diagCloud").textContent=diagCloudData?JSON.stringify(diagCloudData,null,2):"(brak danych z chmury)";
+  let localRaw="(brak)";
+  try{localRaw=JSON.stringify(JSON.parse(localStorage.getItem(LS_KEY)),null,2);}catch(e){localRaw="(błąd odczytu localStorage: "+e.message+")";}
+  $("#diagLocal").textContent=localRaw;
+}
+$("#diagReload").onclick=renderDiag;
+$("#diagPull").onclick=async()=>{await loadFromFirestore();renderAll();renderDiag();toast("Pobrano z chmury");};
+$("#diagPush").onclick=async()=>{await syncDataToCloud();renderDiag();toast("Zapisano do chmury");};
+$("#diagPrices").onclick=async()=>{await refreshPrices();renderDiag();};
+$("#diagCopy").onclick=async()=>{
+  try{await navigator.clipboard.writeText(diagCloudData?JSON.stringify(diagCloudData,null,2):"");toast("Skopiowano dane z chmury");}
+  catch(e){toast("Nie udało się skopiować");}
+};
+
 /* ================= ZDARZENIA ================= */
 document.getElementById("nav").addEventListener("click",e=>{
   const b=e.target.closest("button");if(!b)return;
@@ -1245,6 +1342,7 @@ document.getElementById("nav").addEventListener("click",e=>{
   document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
   document.getElementById("v-"+b.dataset.v).classList.add("on");
   $("#viewTitle").textContent=b.textContent.replace(/^..\s?/,"").trim();
+  if(b.dataset.v==="diag")renderDiag();
 });
 $("#refreshBtn").onclick=refreshPrices;
 $("#pricesStatus").style.cursor="pointer";
