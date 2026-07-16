@@ -431,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.23";
+const APP_VERSION="0.24";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -1399,8 +1399,11 @@ function buildTxIndex(){
   return m;
 }
 // Scalanie wielu wywołań renderAll w jedno przerysowanie na klatkę (mniej zacięć).
-let _renderScheduled=false;
+let _renderScheduled=false, _renderPending=false;
 function renderAll(){
+  // Nie przebudowujemy tła, gdy otwarty jest dialog — przepisywanie DOM pod otwartą natywną listą
+  // <select> powoduje jej „znikanie”/miganie. Render odłożymy na moment zamknięcia dialogu.
+  if(document.querySelector("dialog[open]")){_renderPending=true;return;}
   if(_renderScheduled)return;
   _renderScheduled=true;
   const run=()=>{_renderScheduled=false;renderAllNow();};
@@ -1782,6 +1785,10 @@ const _ver=document.getElementById("appVer");if(_ver)_ver.textContent="wersja "+
 renderCustomTypes();
 restoreCache();
 bindFilters();
+// Po zamknięciu dowolnego dialogu wykonaj odłożony w tym czasie render.
+document.querySelectorAll("dialog").forEach(d=>d.addEventListener("close",()=>{
+  if(_renderPending){_renderPending=false;renderAll();}
+}));
 renderAll();
 // Nie odświeżamy cen przy każdym starcie — pokazujemy je z cache.
 // Wyjątek: pierwsze uruchomienie bez żadnych zapisanych cen, gdy są aktywa z tickerem.
