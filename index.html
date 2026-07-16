@@ -431,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.21";
+const APP_VERSION="0.22";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -709,46 +709,6 @@ async function fetchJSON(url,validate){
 }
 const isChart=d=>d&&d.chart&&d.chart.result&&d.chart.result[0];
 
-/* ===== Stooq — dobre źródło dla GPW (i akcji US/walut). Format CSV. ===== */
-// Mapuje nasz ticker (styl Yahoo) na symbol stooq + walutę notowania. null = zostaw dla Yahoo.
-function toStooqSymbol(t){
-  const u=t.toUpperCase();
-  if(u.endsWith(".WA"))return {sym:u.slice(0,-3).toLowerCase(),cur:"PLN"};      // GPW: PKO.WA -> pko
-  if(u.endsWith("=X"))return null;                                              // waluty — osobno
-  if(u.includes("-"))return null;                                               // krypto (BTC-USD) -> Yahoo
-  if(u.includes("."))return null;                                               // inne giełdy -> Yahoo
-  if(/^[A-Z]{1,6}$/.test(u))return {sym:u.toLowerCase()+".us",cur:"USD"};       // akcje US: AAPL -> aapl.us
-  return null;
-}
-// Parsuje CSV stooq (nagłówek z kolumnami Symbol/Close) -> {SYMBOL_UPPER: close}.
-function parseStooqCSV(text){
-  const lines=text.trim().split(/\r?\n/);if(lines.length<2)return {};
-  const head=lines[0].toLowerCase().split(","),si=head.indexOf("symbol"),ci=head.indexOf("close");
-  if(ci<0)return {};
-  const out={};
-  for(let i=1;i<lines.length;i++){
-    const c=lines[i].split(",");
-    const sym=(si>=0?c[si]:"").trim().toUpperCase(), close=parseFloat(c[ci]);
-    if(sym&&isFinite(close))out[sym]=close;
-  }
-  return out;
-}
-const looksLikeStooqCSV=t=>/symbol/i.test(t)&&/close/i.test(t)&&!/does not exist/i.test(t);
-// Zbiorczo pobiera notowania ze stooq JEDNYM zapytaniem. Zwraca {TICKER:{price,cur}}.
-async function fetchStooqBatch(tickers){
-  const map={}; // ticker -> {stooq,cur}
-  tickers.forEach(t=>{const st=toStooqSymbol(t);if(st)map[t.toUpperCase()]={stooq:st.sym,cur:st.cur};});
-  const syms=[...new Set(Object.values(map).map(m=>m.stooq))];
-  if(!syms.length)return {};
-  const url="https://stooq.com/q/l/?s="+syms.join(",")+"&f=sd2t2ohlcv&h&e=csv";
-  let csv;
-  try{csv=await fetchTextVia(url,looksLikeStooqCSV);}catch(e){console.warn("stooq batch",e);return {};}
-  const by=parseStooqCSV(csv);
-  const out={};
-  for(const [tk,m] of Object.entries(map)){const p=by[m.stooq.toUpperCase()];if(p!=null)out[tk]={price:p,cur:m.cur};}
-  return out;
-}
-
 // Uruchamia zadania z ograniczoną współbieżnością, aby nie przeciążać proxy (rate-limit).
 async function runPool(items,worker,limit){
   const arr=[...items];let i=0;
@@ -818,19 +778,10 @@ async function fetchFX(){
   for(const [c,sym] of Object.entries(pairs)){if(fx[c])continue;
     try{const s=await yahooQuote(sym+"=X");if(s.price)fx[c]=s.price;}catch(e){console.warn("FX",c,e);}
   }
-  // 3) stooq — best-effort (zwykle działa tylko z adresu IP przeglądarki, nie przez proxy)
-  const miss=Object.keys(pairs).filter(c=>!fx[c]);
-  if(miss.length){try{
-    const url="https://stooq.com/q/l/?s="+miss.map(c=>pairs[c].toLowerCase()).join(",")+"&f=sd2t2ohlcv&h&e=csv";
-    const by=parseStooqCSV(await fetchTextVia(url,looksLikeStooqCSV));
-    miss.forEach(c=>{const p=by[pairs[c]];if(p)fx[c]=p;});
-  }catch(e){console.warn("FX stooq",e);}}
   fx.PLN=1;
 }
 // Zwraca liczbę nieudanych pobrań (aby pokazać, czy komplet cen się załadował).
-// Kolejność: Yahoo (przez proxy/worker) jako główne źródło — obsługuje GPW .WA, akcje US,
-// krypto i waluty. Stooq blokuje adresy IP serwerów (proxy/worker dostają 404), więc jest
-// tylko best-effort dla tego, czego Yahoo nie zwróci.
+// Yahoo (przez proxy/worker) jest jedynym źródłem — obsługuje GPW .WA, akcje US, krypto i waluty.
 async function fetchTickers(tickers){
   const got=new Set();
   // Waluta notowania z definicji aktywa — używana, gdy źródło (spark v8) nie podaje waluty.
@@ -842,14 +793,11 @@ async function fetchTickers(tickers){
   // 1) Yahoo spark — jedno zapytanie na wszystkie tickery
   try{apply(await fetchQuotesBatch(tickers),"Yahoo");}catch(e){console.warn("yahoo batch",e);}
   // 2) Yahoo pojedynczo dla brakujących
-  let rest=tickers.filter(t=>!got.has(t.toUpperCase()));
+  const rest=tickers.filter(t=>!got.has(t.toUpperCase()));
   await runPool(rest,async t=>{
     try{const q=await yahooQuote(t);if(q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};got.add(t.toUpperCase());}}
     catch(e){console.warn("Yahoo",t,e);}
   },3);
-  // 3) stooq — best-effort dla wciąż brakujących
-  rest=tickers.filter(t=>!got.has(t.toUpperCase()));
-  if(rest.length){try{apply(await fetchStooqBatch(rest),"Stooq");}catch(e){console.warn("stooq",e);}}
   return tickers.length-got.size;
 }
 // Zabezpieczenie przed zbyt częstym odpytywaniem stooq/Yahoo:
@@ -946,13 +894,12 @@ async function fetchHistoricalPrices(tickers,startDate,endDate){
 }
 
 function getPriceOnDate(ticker,date){
-  const hist=S.priceCache.historical||{};
-  const tu=ticker.toUpperCase();
-  const data=hist[tu]||[];
-  const exact=data.find(x=>x.date===date);
-  if(exact&&exact.price!=null)return exact.price;
-  const before=data.filter(x=>x.date<=date).sort((a,b)=>b.date.localeCompare(a.date))[0];
-  return before?.price;
+  const data=(S.priceCache.historical||{})[ticker.toUpperCase()]||[];
+  if(!data.length)return undefined;
+  // Dane historyczne trzymane rosnąco po dacie — szukamy binarnie ostatniego wpisu <= date.
+  let lo=0,hi=data.length-1,ans=-1;
+  while(lo<=hi){const mid=(lo+hi)>>1;if(data[mid].date<=date){ans=mid;lo=mid+1;}else hi=mid-1;}
+  return ans>=0?data[ans].price:undefined;
 }
 
 /* cena 1 szt. aktywa w jego walucie notowania */
@@ -964,7 +911,10 @@ function assetPrice(a){
 }
 
 /* ================= POZYCJE / LOTY ================= */
-function txOf(aid){return S.tx.filter(t=>t.a===aid).sort((x,y)=>x.date.localeCompare(y.date));}
+function txOf(aid){
+  if(_txByAsset)return _txByAsset.get(aid)||[];
+  return S.tx.filter(t=>t.a===aid).sort((x,y)=>x.date.localeCompare(y.date));
+}
 function computeLots(aid,method){
   method=method||S.settings.method||"FIFO";
   let lots=[],realized=[];
@@ -1089,6 +1039,10 @@ function renderDashboard(){
   $("#d-tax").textContent=fmt(toBase(R.total));
   $("#d-taxSub").textContent="kapitałowe "+fmt(toBase(R.taxCap))+" + dyw./ods. "+fmt(toBase(R.taxDiv));
 
+  // Ciężkie wykresy/heatmapę budujemy tylko gdy Pulpit jest widoczny — inaczej marnowalibyśmy
+  // czas przy każdym odświeżeniu cen/synchronizacji, choć użytkownik patrzy na inną zakładkę.
+  if(!$("#v-dash").classList.contains("on"))return;
+
   // wykres czasu: kapitał zainwestowany narastająco + wartość historyczna + punkt wartości bieżącej
   // dane historyczne czytamy wyłącznie ze zgromadzonego cache — pobiera je przycisk „Odśwież ceny”
   const events=[...S.tx].filter(t=>t.type==="buy"||t.type==="sell").sort((a,b)=>a.date.localeCompare(b.date));
@@ -1113,8 +1067,8 @@ function renderDashboard(){
       scales:{y:{ticks:{callback:v=>Intl.NumberFormat("pl-PL",{notation:"compact"}).format(v)}}}}});
 
   // alokacja
-  const byType={};
-  P.forEach(p=>{if(p.val!=null)byType[getTypes()[p.a.type]]=(byType[getTypes()[p.a.type]]||0)+p.val;});
+  const byType={},types=getTypes();
+  P.forEach(p=>{if(p.val!=null){const k=types[p.a.type];byType[k]=(byType[k]||0)+p.val;}});
   const cols=["#2a78d6","#008300","#eda100","#e87ba4","#1baf7a","#eb6834","#4a3aa7"];
   const keys=Object.keys(byType);
   drawChart("ch-alloc",{type:"doughnut",
@@ -1149,9 +1103,10 @@ function renderDashboard(){
 
 function drawChart(id,cfg){
   if(charts[id])charts[id].destroy();
-  const ink=getComputedStyle(document.body).getPropertyValue("--ink2").trim();
-  const line=getComputedStyle(document.body).getPropertyValue("--line").trim();
-  Chart.defaults.color=ink;Chart.defaults.borderColor=line;Chart.defaults.font.family=getComputedStyle(document.body).fontFamily;
+  const cs=getComputedStyle(document.body);
+  Chart.defaults.color=cs.getPropertyValue("--ink2").trim();
+  Chart.defaults.borderColor=cs.getPropertyValue("--line").trim();
+  Chart.defaults.font.family=cs.fontFamily;
   charts[id]=new Chart(document.getElementById(id),cfg);
 }
 
@@ -1430,9 +1385,29 @@ function dl(name,content,mime){
   a.href=u;a.download=name;a.click();URL.revokeObjectURL(u);
 }
 
+// Indeks transakcji per aktywo — budowany raz na render, żeby txOf/computeLots nie filtrowały
+// i nie sortowały całej listy S.tx dziesiątki razy przy każdym przerysowaniu.
+let _txByAsset=null;
+function buildTxIndex(){
+  const m=new Map();
+  for(const t of S.tx){let a=m.get(t.a);if(!a){a=[];m.set(t.a,a);}a.push(t);}
+  m.forEach(arr=>arr.sort((x,y)=>x.date.localeCompare(y.date)));
+  return m;
+}
+// Scalanie wielu wywołań renderAll w jedno przerysowanie na klatkę (mniej zacięć).
+let _renderScheduled=false;
 function renderAll(){
-  fillAssetSelects();fillYears();
-  renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
+  if(_renderScheduled)return;
+  _renderScheduled=true;
+  const run=()=>{_renderScheduled=false;renderAllNow();};
+  (typeof requestAnimationFrame==="function")?requestAnimationFrame(run):setTimeout(run,0);
+}
+function renderAllNow(){
+  _txByAsset=buildTxIndex();
+  try{
+    fillAssetSelects();fillYears();
+    renderDashboard();renderAssets();renderTx();renderBonds();renderTax();
+  }finally{_txByAsset=null;}
 }
 
 /* ================= DIAGNOSTYKA ================= */
@@ -1517,6 +1492,7 @@ document.getElementById("nav").addEventListener("click",e=>{
   document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
   document.getElementById("v-"+b.dataset.v).classList.add("on");
   $("#viewTitle").textContent=b.textContent.replace(/^..\s?/,"").trim();
+  if(b.dataset.v==="dash")renderAll(); // zbuduj wykresy gdy Pulpit staje się widoczny
   if(b.dataset.v==="diag")renderDiag();
   if(b.dataset.v==="set"){ // odśwież pola ustawień (mogły zmienić się po synchronizacji z chmurą)
     $("#proxyUrl").value=S.settings.proxyUrl||"";
@@ -1742,9 +1718,9 @@ $("#proxyTest").onclick=async()=>{
   const base=v.replace(/\/+$/,"");
   toast("Testuję serwer cen…");
   try{
-    const r=await fetchTimed(base+"?url="+encodeURIComponent("https://stooq.com/q/l/?s=pko&f=sd2t2ohlcv&h&e=csv"),9000);
+    const r=await fetchTimed(base+"?url="+encodeURIComponent("https://query1.finance.yahoo.com/v7/finance/spark?symbols=PKO.WA&range=1d&interval=1d"),9000);
     const t=await r.text();
-    if(/close/i.test(t)&&/pko/i.test(t))toast("✓ Serwer działa — pobrano przykładową cenę");
+    if(/regularMarketPrice/.test(t)||/"close"/.test(t))toast("✓ Serwer działa — pobrano przykładową cenę");
     else toast("Serwer odpowiedział, ale treść jest nieoczekiwana (kod "+r.status+")");
   }catch(e){toast("✗ Serwer nie odpowiada: "+e.message);}
 };
