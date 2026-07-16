@@ -431,8 +431,80 @@ function getTypes(){return {...DEFAULT_TYPES,...(S.settings.customTypes||{})};}
 function getTagCls(){return {...DEFAULT_TAGCLS,...(S.settings.customTagCls||{})}}
 
 function load(){
-  try{const d=JSON.parse(localStorage.getItem(LS_KEY));if(d&&d.assets)return d;}catch(e){}
-  return demoData();
+  try{const d=JSON.parse(localStorage.getItem(LS_KEY));if(d&&d.assets)return normalizeState(d);}catch(e){}
+  const demo=normalizeState(demoData());demo._demo=true;return demo;
+}
+/* ================= SCALANIE RÓŻNICOWE (merge po ID + tombstones) ================= */
+function nowTs(){return Date.now();}
+// Uzupełnia brakujące pola (updatedAt, tombstones) i porządkuje strukturę stanu.
+function normalizeState(s){
+  s=s||{};
+  s.assets=Array.isArray(s.assets)?s.assets:[];
+  s.tx=Array.isArray(s.tx)?s.tx:[];
+  s.settings=s.settings||{base:"PLN",method:"FIFO",autoRef:false};
+  s.priceCache=s.priceCache||{};
+  s.deleted=s.deleted||{};
+  s.deleted.assets=s.deleted.assets||{};
+  s.deleted.tx=s.deleted.tx||{};
+  if(s.settingsUpdatedAt==null)s.settingsUpdatedAt=0;
+  s.assets.forEach(a=>{if(a.updatedAt==null)a.updatedAt=0;});
+  s.tx.forEach(t=>{if(t.updatedAt==null)t.updatedAt=0;});
+  const cutoff=nowTs()-180*86400000; // usuń tombstone'y starsze niż ~180 dni, by nie rosły bez końca
+  for(const m of [s.deleted.assets,s.deleted.tx])for(const id in m)if(m[id]<cutoff)delete m[id];
+  return s;
+}
+// Dla każdego ID wybiera wersję z nowszym updatedAt; pomija rekordy skasowane (tombstone >= updatedAt).
+function mergeById(a,b,tombs){
+  const map=new Map();
+  const consider=it=>{const cur=map.get(it.id);if(!cur||(it.updatedAt||0)>=(cur.updatedAt||0))map.set(it.id,it);};
+  (a||[]).forEach(consider);(b||[]).forEach(consider);
+  const out=[];
+  map.forEach((it,id)=>{const d=tombs[id];if(d!=null&&d>=(it.updatedAt||0))return;out.push(it);});
+  return out;
+}
+function mergeTombs(a,b){const o={...(a||{})},bb=b||{};for(const id in bb)o[id]=Math.max(o[id]||0,bb[id]);return o;}
+function mergePriceCache(a,b){
+  a=a||{};b=b||{};
+  const newer=(b.ts||0)>=(a.ts||0)?b:a;
+  const historical={};
+  const keys=new Set([...Object.keys(a.historical||{}),...Object.keys(b.historical||{})]);
+  keys.forEach(k=>{const ha=(a.historical||{})[k]||[],hb=(b.historical||{})[k]||[];historical[k]=hb.length>=ha.length?hb:ha;});
+  return {prices:newer.prices||{},fx:newer.fx||{},historical,ts:Math.max(a.ts||0,b.ts||0)};
+}
+// Łączy dwa stany bez utraty danych: unia aktywów/transakcji po ID, nowszy updatedAt wygrywa.
+function mergeState(a,b){
+  a=normalizeState({...a});b=normalizeState({...b});
+  const dA=mergeTombs(a.deleted.assets,b.deleted.assets);
+  const dT=mergeTombs(a.deleted.tx,b.deleted.tx);
+  const settingsNewer=(b.settingsUpdatedAt||0)>(a.settingsUpdatedAt||0);
+  return {
+    assets:mergeById(a.assets,b.assets,dA),
+    tx:mergeById(a.tx,b.tx,dT),
+    settings:settingsNewer?b.settings:a.settings,
+    settingsUpdatedAt:Math.max(a.settingsUpdatedAt||0,b.settingsUpdatedAt||0),
+    priceCache:mergePriceCache(a.priceCache,b.priceCache),
+    deleted:{assets:dA,tx:dT}
+  };
+}
+// Odcisk danych użytkownika (bez cache cen) — do wykrywania realnych zmian.
+function userFingerprint(s){
+  s=normalizeState({...s});
+  const norm=arr=>[...arr].sort((x,y)=>x.id<y.id?-1:x.id>y.id?1:0);
+  return JSON.stringify({assets:norm(s.assets),tx:norm(s.tx),settings:s.settings,su:s.settingsUpdatedAt,del:s.deleted});
+}
+function touchSettings(){S.settingsUpdatedAt=nowTs();}
+// Zastępuje cały portfel nowym stanem, zostawiając tombstone'y dla usuniętych ID (import/demo/reset).
+function replaceAll(newState){
+  const ts=nowTs();
+  const keepA=new Set((newState.assets||[]).map(x=>x.id)), keepT=new Set((newState.tx||[]).map(x=>x.id));
+  const del={assets:{...(S.deleted&&S.deleted.assets||{})},tx:{...(S.deleted&&S.deleted.tx||{})}};
+  (S.assets||[]).forEach(a=>{if(!keepA.has(a.id))del.assets[a.id]=ts;});
+  (S.tx||[]).forEach(t=>{if(!keepT.has(t.id))del.tx[t.id]=ts;});
+  newState=normalizeState(newState);
+  newState.assets.forEach(a=>a.updatedAt=ts);
+  newState.tx.forEach(t=>t.updatedAt=ts);
+  newState.deleted=del;newState.settingsUpdatedAt=ts;
+  return newState;
 }
 /* ===== Status synchronizacji danych ===== */
 let syncResting={text:"dane: —",cls:""}, syncFlashTimer=null;
@@ -472,9 +544,15 @@ async function loadFromFirestore(){
   busySync("pobieram z chmury…");
   try{const doc=await firestore.collection("users").doc(currentUser.uid).get();
     if(doc.exists&&doc.data().data){
-      S=doc.data().data;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));
+      const remote=normalizeState(doc.data().data);
+      // Dane demo (podgląd przed pierwszym logowaniem) nie są scalane — chmura je zastępuje.
+      if(S._demo){S=remote;}else{S=mergeState(S,remote);}
+      delete S._demo;
+      restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));
       const fromCache=doc.metadata&&doc.metadata.fromCache, h=histCount();
-      setSyncResting((fromCache?"wczytane z cache (offline)":"wczytane z chmury")+(h?" • historia: "+h:""),"ok");
+      setSyncResting((fromCache?"wczytane z cache (offline)":"scalone z chmurą")+(h?" • historia: "+h:""),"ok");
+      // Jeśli po scaleniu mamy lokalne zmiany, których nie ma w chmurze — odeślij.
+      if(userFingerprint(S)!==userFingerprint(remote))syncDataToCloud();
       return true;
     }
     setSyncResting("brak danych w chmurze","warn");
@@ -484,12 +562,18 @@ async function loadFromFirestore(){
 function setupFirestoreListener(){
   if(!currentUser||syncListener)return;
   syncListener=firestore.collection("users").doc(currentUser.uid).onSnapshot(doc=>{
-    if(doc.exists&&doc.data().data){const remoteData=doc.data().data;
+    if(doc.exists&&doc.data().data){
+      const remote=normalizeState(doc.data().data);
       const fromCache=doc.metadata&&doc.metadata.fromCache;
-      if(JSON.stringify(remoteData)!==JSON.stringify(S)){
-        S=remoteData;restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));renderAll();
-        flashSync(fromCache?"zaktualizowano z cache":"zaktualizowano z chmury","ok");
+      const merged=mergeState(S,remote);
+      const changed=userFingerprint(merged)!==userFingerprint(S)||JSON.stringify(merged.priceCache)!==JSON.stringify(S.priceCache);
+      S=merged;
+      if(changed){
+        restoreCache();localStorage.setItem(LS_KEY,JSON.stringify(S));renderAll();
+        flashSync(fromCache?"zaktualizowano z cache":"scalono zmiany z chmury","ok");
       }
+      // Wypchnij nasze lokalne zmiany, których chmura jeszcze nie ma.
+      if(userFingerprint(merged)!==userFingerprint(remote))syncDataToCloud();
       const h=histCount();
       setSyncResting("zsynchronizowane"+(fromCache?" (offline)":"")+(h?" • historia: "+h:""),"ok");
     }
@@ -1081,12 +1165,15 @@ function toggleBondFields(){
 window.editAsset=id=>openAssetDlg(S.assets.find(a=>a.id===id));
 window.delAsset=id=>{
   if(!confirm("Usunąć aktywo wraz z jego transakcjami?"))return;
+  const ts=nowTs();
+  S.deleted.assets[id]=ts;
+  S.tx.filter(t=>t.a===id).forEach(t=>S.deleted.tx[t.id]=ts);
   S.assets=S.assets.filter(a=>a.id!==id);S.tx=S.tx.filter(t=>t.a!==id);save();renderAll();toast("Usunięto");
 };
 window.quickPrice=id=>{
   const a=S.assets.find(x=>x.id===id);
   const v=prompt("Bieżąca wycena 1 szt. ("+a.cur+") — "+a.name,a.manual||"");
-  if(v===null)return;a.manual=v===""?null:+v;save();renderAll();toast("Zaktualizowano wycenę");
+  if(v===null)return;a.manual=v===""?null:+v;a.updatedAt=nowTs();save();renderAll();toast("Zaktualizowano wycenę");
 };
 function openTxDlg(t){
   editingTxId=t?t.id:null;
@@ -1105,7 +1192,7 @@ function openTxDlg(t){
   document.getElementById("txDlg").showModal();
 }
 window.editTx=id=>{const t=S.tx.find(x=>x.id===id);if(t)openTxDlg(t);};
-window.delTx=id=>{if(!confirm("Usunąć transakcję?"))return;S.tx=S.tx.filter(t=>t.id!==id);save();renderAll();};
+window.delTx=id=>{if(!confirm("Usunąć transakcję?"))return;S.deleted.tx[id]=nowTs();S.tx=S.tx.filter(t=>t.id!==id);save();renderAll();};
 
 function fillAssetSelects(){
   const opts=S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
@@ -1162,7 +1249,7 @@ document.getElementById("nav").addEventListener("click",e=>{
 $("#refreshBtn").onclick=refreshPrices;
 $("#pricesStatus").style.cursor="pointer";
 $("#pricesStatus").onclick=refreshPrices;
-$("#baseCur").onchange=e=>{S.settings.base=e.target.value;save();renderAll();};
+$("#baseCur").onchange=e=>{S.settings.base=e.target.value;touchSettings();save();renderAll();};
 $("#a-type").onchange=toggleBondFields;
 $("#addAssetBtn").onclick=()=>openAssetDlg(null);
 $("#assetCancel").onclick=()=>document.getElementById("assetDlg").close();
@@ -1173,7 +1260,8 @@ $("#assetSave").onclick=()=>{
     ticker:$("#a-ticker").value.trim()||null,
     manual:$("#a-manual").value===""?null:+$("#a-manual").value,
     rate:$("#a-rate").value===""?null:+$("#a-rate").value,
-    maturity:$("#a-maturity").value||null,notes:$("#a-notes").value.trim()||null
+    maturity:$("#a-maturity").value||null,notes:$("#a-notes").value.trim()||null,
+    updatedAt:nowTs()
   };
   if(editingId){const i=S.assets.findIndex(a=>a.id===editingId);S.assets[i]=obj;}
   else S.assets.push(obj);
@@ -1186,13 +1274,13 @@ $("#addTxBtn").onclick=()=>{
 $("#txCancel").onclick=()=>document.getElementById("txDlg").close();
 $("#txSave").onclick=()=>{
   const t={id:editingTxId||uid(),a:$("#t-asset").value,type:$("#t-type").value,date:$("#t-date").value,
-    qty:+$("#t-qty").value||1,price:+$("#t-price").value||0,fee:+$("#t-fee").value||0};
+    qty:+$("#t-qty").value||1,price:+$("#t-price").value||0,fee:+$("#t-fee").value||0,updatedAt:nowTs()};
   if(!t.date){toast("Podaj datę");return;}
   if(editingTxId){const i=S.tx.findIndex(x=>x.id===editingTxId);S.tx[i]=t;}
   else S.tx.push(t);
   save();document.getElementById("txDlg").close();renderAll();toast(editingTxId?"Zaktualizowano transakcję":"Dodano transakcję");
 };
-$("#taxYear").onchange=renderTax;$("#taxMethod").onchange=e=>{S.settings.method=e.target.value;save();renderAll();};
+$("#taxYear").onchange=renderTax;$("#taxMethod").onchange=e=>{S.settings.method=e.target.value;touchSettings();save();renderAll();};
 $("#simBtn").onclick=runSim;
 $("#simAsset").onchange=()=>{
   const a=S.assets.find(x=>x.id===$("#simAsset").value);if(!a)return;
@@ -1217,7 +1305,7 @@ $("#csvAssetBtn").onclick=()=>{$("#fileInp").dataset.mode="csv";$("#fileInp").cl
 $("#fileInp").onchange=async e=>{
   const f=e.target.files[0];if(!f)return;const txt=await f.text();
   if(e.target.dataset.mode==="json"){
-    try{const d=JSON.parse(txt);if(!d.assets)throw 0;S=d;save();restoreCache();renderAll();toast("Zaimportowano backup");}
+    try{const d=JSON.parse(txt);if(!d.assets)throw 0;S=replaceAll(d);save();restoreCache();renderAll();toast("Zaimportowano backup");}
     catch(err){toast("Nieprawidłowy plik JSON");}
   }else{
     let n=0;
@@ -1226,8 +1314,8 @@ $("#fileInp").onchange=async e=>{
       const c=line.split(";");if(c.length<7)return;
       const typeMap={"akcje gpw":"akcje_pl","akcje":"akcje_pl","akcje zagr":"akcje_zagr","etf":"etf","obligacja":"obligacja","krypto":"krypto","zloto":"zloto","złoto":"zloto","kolekcja":"kolekcja"};
       const id=uid();
-      S.assets.push({id,name:c[0],ticker:c[1]||null,type:typeMap[(c[2]||"").toLowerCase()]||"akcje_pl",cur:c[3]||"PLN"});
-      S.tx.push({id:uid(),a:id,type:"buy",date:c[6]||new Date().toISOString().slice(0,10),qty:+c[4]||1,price:+c[5]||0,fee:0});
+      S.assets.push({id,name:c[0],ticker:c[1]||null,type:typeMap[(c[2]||"").toLowerCase()]||"akcje_pl",cur:c[3]||"PLN",updatedAt:nowTs()});
+      S.tx.push({id:uid(),a:id,type:"buy",date:c[6]||new Date().toISOString().slice(0,10),qty:+c[4]||1,price:+c[5]||0,fee:0,updatedAt:nowTs()});
       n++;
     });
     save();renderAll();toast("Zaimportowano "+n+" pozycji");
@@ -1235,12 +1323,8 @@ $("#fileInp").onchange=async e=>{
   e.target.value="";
 };
 function resetAllData(){
-  S={
-    assets:[],
-    tx:[],
-    settings:{base:"PLN",method:"FIFO",autoRef:false},
-    priceCache:{}
-  };
+  // replaceAll zostawia tombstone'y dla usuniętych ID, aby kasowanie rozeszło się na inne urządzenia.
+  S=replaceAll({assets:[],tx:[],settings:{base:"PLN",method:"FIFO",autoRef:false},priceCache:{}});
   prices={};
   fx={PLN:1};
   save();
@@ -1252,7 +1336,7 @@ $("#wipeBtn").onclick=()=>{
   if(!confirm("Na pewno usunąć WSZYSTKIE dane? Tej operacji nie można cofnąć."))return;
   resetAllData();
 };
-$("#demoBtn").onclick=()=>{S=demoData();save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
+$("#demoBtn").onclick=()=>{S=replaceAll(demoData());save();renderAll();refreshPrices();toast("Załadowano portfel testowy");};
 /* ===== Uwierzytelnianie / ekran logowania ===== */
 let authMode="login", pendingLogin=false;
 function showGate(){const g=$("#authGate");if(g)g.classList.remove("hidden");}
@@ -1368,7 +1452,7 @@ function updateCloudUI(){
   st.style.display=logged?"block":"none";
   if(logged)st.textContent="Zalogowano jako "+(currentUser.email||"użytkownik")+". Dane synchronizują się automatycznie.";
 }
-$("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;save();setupAuto();};
+$("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;touchSettings();save();setupAuto();};
 function renderCustomTypes(){
   const custom=S.settings.customTypes||{};
   const html=Object.entries(custom).map(([k,v])=>`
@@ -1384,7 +1468,7 @@ window.delCustomType=k=>{
   if(!S.settings.customTypes)S.settings.customTypes={};
   delete S.settings.customTypes[k];
   delete S.settings.customTagCls?.[k];
-  save();renderCustomTypes();toast("Usunięto kategorię");
+  touchSettings();save();renderCustomTypes();toast("Usunięto kategorię");
 };
 $("#addTypeBtn").onclick=()=>{
   const name=$("#newTypeName").value.trim();
@@ -1392,7 +1476,7 @@ $("#addTypeBtn").onclick=()=>{
   const key="custom_"+Date.now();
   if(!S.settings.customTypes)S.settings.customTypes={};
   S.settings.customTypes[key]=name;
-  save();$("#newTypeName").value="";renderCustomTypes();toast("Dodano kategorię");
+  touchSettings();save();$("#newTypeName").value="";renderCustomTypes();toast("Dodano kategorię");
 };
 let autoTimer=null;
 function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=setInterval(refreshPrices,10*60*1000);}
