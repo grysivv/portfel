@@ -431,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.22";
+const APP_VERSION="0.23";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -1346,22 +1346,26 @@ function openTxDlg(t){
 window.editTx=id=>{const t=S.tx.find(x=>x.id===id);if(t)openTxDlg(t);};
 window.delTx=id=>{if(!confirm("Usunąć transakcję?"))return;S.deleted.tx[id]=nowTs();S.tx=S.tx.filter(t=>t.id!==id);save();renderAll();};
 
+// Ustawia opcje selecta TYLKO gdy faktycznie się zmieniły — inaczej przepisywanie innerHTML przy
+// każdym renderze (np. po odświeżeniu cen) powodowało miganie i znikanie tekstu w otwartej liście.
+function setOptions(el,html,keepVal){
+  if(!el||el._optsSig===html)return;
+  el._optsSig=html;
+  const v=keepVal?el.value:null;
+  el.innerHTML=html;
+  if(v!=null&&v!=="")el.value=v;
+}
 function fillAssetSelects(){
   const opts=S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
-  $("#t-asset").innerHTML=opts;$("#simAsset").innerHTML=opts;
+  setOptions($("#t-asset"),opts,true);
+  setOptions($("#simAsset"),opts,true);
   fillFilterSelects();
 }
 function fillFilterSelects(){
   const types=getTypes();
   const usedTypes=[...new Set(S.assets.map(a=>a.type))];
-  const tSel=$("#assetTypeFilter");
-  if(tSel){const cur=tSel.value;
-    tSel.innerHTML=`<option value="">Wszystkie</option>`+usedTypes.map(t=>`<option value="${t}">${types[t]||t}</option>`).join("");
-    tSel.value=cur;}
-  const aSel=$("#txAssetFilter");
-  if(aSel){const cur=aSel.value;
-    aSel.innerHTML=`<option value="">Wszystkie</option>`+S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
-    aSel.value=cur;}
+  setOptions($("#assetTypeFilter"),`<option value="">Wszystkie</option>`+usedTypes.map(t=>`<option value="${t}">${types[t]||t}</option>`).join(""),true);
+  setOptions($("#txAssetFilter"),`<option value="">Wszystkie</option>`+S.assets.map(a=>`<option value="${a.id}">${a.name}</option>`).join(""),true);
 }
 function bindFilters(){
   const aCtl=["assetSearch","assetTypeFilter","assetSort"];
@@ -1375,7 +1379,7 @@ function bindFilters(){
 }
 function fillYears(){
   const ys=new Set(S.tx.map(t=>+t.date.slice(0,4)));ys.add(new Date().getFullYear());
-  $("#taxYear").innerHTML=[...ys].sort((a,b)=>b-a).map(y=>`<option>${y}</option>`).join("");
+  setOptions($("#taxYear"),[...ys].sort((a,b)=>b-a).map(y=>`<option>${y}</option>`).join(""),true);
 }
 
 /* eksporty */
