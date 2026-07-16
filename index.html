@@ -361,6 +361,15 @@ dialog h3{font-size:16px;margin-bottom:14px}
         <label class="mini" style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="autoRef"> automatyczne odświeżanie co 10 minut
         </label>
+        <div style="margin-top:14px">
+          <label class="mini" style="display:block;margin-bottom:4px">Serwer cen (własne proxy) — opcjonalne, ale najpewniejsze źródło</label>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <input type="text" id="proxyUrl" placeholder="https://twoj-worker.workers.dev" style="flex:1;min-width:220px">
+            <button class="btn" id="proxySave">Zapisz</button>
+            <button class="btn" id="proxyTest">Testuj</button>
+          </div>
+          <p class="note">Darmowe publiczne proxy CORS bywają niedostępne — wtedy ceny się nie pobierają. Własny <b>Cloudflare Worker</b> (darmowy) rozwiązuje to na stałe: pobiera ceny ze stooq/Yahoo po stronie serwera i zwraca je z nagłówkami CORS. Kod workera i instrukcja: plik <code>cloudflare-worker.js</code> w repozytorium. Po wdrożeniu wklej tutaj adres <code>…workers.dev</code> — będzie używany w pierwszej kolejności, a publiczne proxy zostaną jako zapas.</p>
+        </div>
         <h3 style="margin:18px 0 12px">Chmura</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" id="cloudLoginBtn">☁ Zaloguj się przez Google</button>
@@ -422,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.15";
+const APP_VERSION="0.18";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -670,9 +679,17 @@ async function fetchTimed(url,ms){
 }
 // Pobiera surową treść (tekst) próbując kolejnych źródeł; akceptuje TYLKO gdy przejdzie walidator.
 // Dzięki temu strona HTML proxy / błędu jest odrzucana i próbujemy następnego źródła.
+// Lista źródeł: jeśli ustawiono własne proxy (Cloudflare Worker), używamy go w PIERWSZEJ kolejności,
+// a publiczne proxy zostają jako zapas.
+function priceSources(){
+  const custom=S.settings&&S.settings.proxyUrl&&S.settings.proxyUrl.trim();
+  if(!custom)return JSON_SOURCES;
+  const base=custom.replace(/\/+$/,"");
+  return [{name:"własne proxy",make:u=>base+"?url="+encodeURIComponent(u)},...JSON_SOURCES];
+}
 async function fetchTextVia(url,validate){
   let lastErr;
-  for(const src of JSON_SOURCES){
+  for(const src of priceSources()){
     try{
       const r=await fetchTimed(src.make(url),8000);
       if(!r.ok)throw new Error("HTTP "+r.status);
@@ -1478,6 +1495,10 @@ document.getElementById("nav").addEventListener("click",e=>{
   document.getElementById("v-"+b.dataset.v).classList.add("on");
   $("#viewTitle").textContent=b.textContent.replace(/^..\s?/,"").trim();
   if(b.dataset.v==="diag")renderDiag();
+  if(b.dataset.v==="set"){ // odśwież pola ustawień (mogły zmienić się po synchronizacji z chmurą)
+    $("#proxyUrl").value=S.settings.proxyUrl||"";
+    $("#autoRef").checked=!!S.settings.autoRef;
+  }
 });
 $("#refreshBtn").onclick=refreshPrices;
 $("#pricesStatus").style.cursor="pointer";
@@ -1686,6 +1707,24 @@ function updateCloudUI(){
   if(logged)st.textContent="Zalogowano jako "+(currentUser.email||"użytkownik")+". Dane synchronizują się automatycznie.";
 }
 $("#autoRef").onchange=e=>{S.settings.autoRef=e.target.checked;touchSettings();save();setupAuto();};
+$("#proxySave").onclick=()=>{
+  const v=$("#proxyUrl").value.trim();
+  if(v&&!/^https?:\/\//i.test(v)){toast("Adres musi zaczynać się od https://");return;}
+  S.settings.proxyUrl=v||null;touchSettings();save();
+  toast(v?"Zapisano serwer cen":"Usunięto serwer cen — wracam do publicznych proxy");
+};
+$("#proxyTest").onclick=async()=>{
+  const v=$("#proxyUrl").value.trim();
+  if(!v){toast("Najpierw wpisz adres serwera");return;}
+  const base=v.replace(/\/+$/,"");
+  toast("Testuję serwer cen…");
+  try{
+    const r=await fetchTimed(base+"?url="+encodeURIComponent("https://stooq.com/q/l/?s=pko&f=sd2t2ohlcv&h&e=csv"),9000);
+    const t=await r.text();
+    if(/close/i.test(t)&&/pko/i.test(t))toast("✓ Serwer działa — pobrano przykładową cenę");
+    else toast("Serwer odpowiedział, ale treść jest nieoczekiwana (kod "+r.status+")");
+  }catch(e){toast("✗ Serwer nie odpowiada: "+e.message);}
+};
 function renderCustomTypes(){
   const custom=S.settings.customTypes||{};
   const html=Object.entries(custom).map(([k,v])=>`
@@ -1735,6 +1774,7 @@ if(auth){
 $("#baseCur").value=S.settings.base||"PLN";
 $("#taxMethod").value=S.settings.method||"FIFO";
 $("#autoRef").checked=!!S.settings.autoRef;
+$("#proxyUrl").value=S.settings.proxyUrl||"";
 const _ver=document.getElementById("appVer");if(_ver)_ver.textContent="wersja "+APP_VERSION;
 renderCustomTypes();
 restoreCache();
