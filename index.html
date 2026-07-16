@@ -648,28 +648,36 @@ function toBase(vPLN){return vPLN/(fx[S.settings.base]||1);}
 function conv(v,cur){return toBase(toPLN(v,cur));}
 
 /* ================= CENY (Yahoo Finance) ================= */
-async function fetchText(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.text();}
-// Kolejne warianty dostępu do zasobu: najpierw bezpośrednio, potem przez publiczne proxy CORS.
-// Wiele proxy w rezerwie, bo darmowe bywają chwilowo niedostępne lub ograniczają liczbę żądań.
-const PROXIES=[
-  u=>u,
-  u=>"https://corsproxy.io/?url="+encodeURIComponent(u),
-  u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
-  u=>"https://thingproxy.freeboard.io/fetch/"+u
+// Źródła dostępu do zasobu: bezpośrednio + publiczne proxy CORS (gdy Yahoo blokuje CORS/rate-limit).
+// `extract` wydobywa właściwą treść (część proxy owija odpowiedź we własny JSON).
+const JSON_SOURCES=[
+  {name:"direct",     make:u=>u},
+  {name:"allorigins-raw", make:u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u)},
+  {name:"codetabs",   make:u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u)},
+  {name:"allorigins-get", make:u=>"https://api.allorigins.win/get?url="+encodeURIComponent(u), extract:t=>JSON.parse(t).contents},
+  {name:"corsproxy",  make:u=>"https://corsproxy.io/?url="+encodeURIComponent(u)},
+  {name:"thingproxy", make:u=>"https://thingproxy.freeboard.io/fetch/"+u}
 ];
-async function tryProxy(url){
+// Pobiera JSON próbując kolejnych źródeł. Akceptuje odpowiedź TYLKO gdy parsuje się do JSON
+// i przechodzi walidację — dzięki temu proxy zwracające własną stronę HTML jest odrzucane
+// i próbujemy następnego (wcześniej taka „odpowiedź” była błędnie uznawana za sukces).
+async function fetchJSON(url,validate){
   let lastErr;
-  for(const mk of PROXIES){
+  for(const src of JSON_SOURCES){
     try{
-      const r=await fetch(mk(url));
+      const r=await fetch(src.make(url));
       if(!r.ok)throw new Error("HTTP "+r.status);
-      const t=await r.text();
-      if(t&&t.trim())return t;
-      throw new Error("pusta odpowiedź");
+      let body=await r.text();
+      if(!body||!body.trim())throw new Error("pusta odpowiedź");
+      if(src.extract)body=src.extract(body);
+      const data=JSON.parse(body);
+      if(validate&&!validate(data))throw new Error("nieoczekiwana treść ("+src.name+")");
+      return data;
     }catch(e){lastErr=e;}
   }
-  throw lastErr||new Error("wszystkie proxy zawiodły");
+  throw lastErr||new Error("wszystkie źródła zawiodły");
 }
+const isChart=d=>d&&d.chart&&d.chart.result&&d.chart.result[0];
 // Uruchamia zadania z ograniczoną współbieżnością, aby nie przeciążać proxy (rate-limit).
 async function runPool(items,worker,limit){
   const arr=[...items];let i=0;
@@ -679,12 +687,17 @@ async function runPool(items,worker,limit){
   await Promise.all(runners);
 }
 async function yahooQuote(sym){
-  const url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?range=1d&interval=1d";
-  const txt=await tryProxy(url);
-  const d=JSON.parse(txt);
-  const res=d.chart&&d.chart.result&&d.chart.result[0];
-  if(!res)throw new Error("brak danych");
-  return {price:res.meta.regularMarketPrice,cur:res.meta.currency||"USD"};
+  // Próbujemy obu hostów Yahoo — gdy jeden zwraca 429/blokadę, drugi zwykle działa.
+  let lastErr;
+  for(const host of ["query1","query2"]){
+    try{
+      const url="https://"+host+".finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?range=1d&interval=1d";
+      const d=await fetchJSON(url,x=>isChart(x)&&x.chart.result[0].meta);
+      const res=d.chart.result[0];
+      return {price:res.meta.regularMarketPrice,cur:res.meta.currency||"USD"};
+    }catch(e){lastErr=e;}
+  }
+  throw lastErr||new Error("brak danych");
 }
 async function fetchFX(){
   const pairs={USD:"USDPLN=X",EUR:"EURPLN=X",GBP:"GBPPLN=X",CHF:"CHFPLN=X"};
@@ -719,12 +732,22 @@ async function refreshPrices(){
     }catch(e){console.warn("Hist",e);flashSync("błąd danych historycznych","warn",3000);}
   }
   const historical=S.priceCache.historical||{};
-  S.priceCache={prices,fx,historical,ts:Date.now()};save();
-  const time=new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"});
   const total=tickers.length, ok=total-failed;
-  if(!total){st.textContent="ceny: brak tickerów";st.className="pill";}
-  else if(failed){st.textContent="ceny: "+ok+"/"+total+" • "+time;st.className="pill warn";
-    st.title="Nie udało się pobrać "+failed+" z "+total+" cen. Kliknij, aby spróbować ponownie.";}
+  const prevTs=S.priceCache.ts;
+  // Gdy nic nie pobrano, zachowujemy poprzedni znacznik czasu — wiek cache pokazuje realny wiek cen.
+  const ts=ok>0?Date.now():(prevTs||null);
+  S.priceCache={prices,fx,historical,ts};save();
+  const fmtT=t=>new Date(t).toLocaleString("pl-PL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+  const time=new Date().toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"});
+  const haveCache=Object.keys(prices).length>0;
+  if(!total){st.textContent="ceny: brak tickerów";st.className="pill";st.title="";}
+  else if(ok===0){
+    // Nic nie udało się pobrać — pokazujemy ostatnio dostępne ceny z cache.
+    st.textContent=haveCache?("ceny: offline • ostatnie z "+(prevTs?fmtT(prevTs):"cache")):"ceny: brak (offline)";
+    st.className="pill warn";
+    st.title="Nie udało się pobrać aktualnych cen (źródło niedostępne lub limit zapytań). Pokazuję ostatnio zapisane. Kliknij, aby spróbować ponownie.";
+  }else if(failed){st.textContent="ceny: "+ok+"/"+total+" • "+time;st.className="pill warn";
+    st.title="Pobrano "+ok+" z "+total+" cen; brakujące pokazane z ostatniego zapisu. Kliknij, aby ponowić.";}
   else{st.textContent="ceny: OK • "+time;st.className="pill ok";st.title="Wszystkie ceny pobrane.";}
   renderAll();
 }
@@ -739,10 +762,11 @@ function restoreCache(){
 async function yahooHistorical(sym,start,end){
   const s=Math.floor(new Date(start).getTime()/1000);
   const e=Math.floor(new Date(end).getTime()/1000);
-  const url="https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?period1="+s+"&period2="+e+"&interval=1d";
+  const path="/v8/finance/chart/"+encodeURIComponent(sym)+"?period1="+s+"&period2="+e+"&interval=1d";
   try{
-    const txt=await tryProxy(url);
-    const d=JSON.parse(txt);
+    let d;
+    try{d=await fetchJSON("https://query1.finance.yahoo.com"+path,isChart);}
+    catch(_){d=await fetchJSON("https://query2.finance.yahoo.com"+path,isChart);}
     const res=d.chart&&d.chart.result&&d.chart.result[0];
     if(!res)return [];
     const stamps=res.timestamp||[];
