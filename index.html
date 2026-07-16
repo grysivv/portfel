@@ -431,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.18";
+const APP_VERSION="0.21";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -771,33 +771,52 @@ async function yahooQuote(sym){
   throw lastErr||new Error("brak danych");
 }
 // Zbiorcze pobranie notowań JEDNYM zapytaniem (endpoint spark) — dużo mniejsze ryzyko rate-limitu
-// niż osobne zapytanie na każdy ticker. Zwraca {TICKER:{price,cur}}.
+// niż osobne zapytanie na każdy ticker. Zwraca {TICKER:{price,cur}} (cur=null gdy Yahoo jej nie podało).
+// UWAGA: /v7/finance/spark zwraca format opakowany {spark:{result:[{response:[{meta:{regularMarketPrice,
+// currency}}]}]}}, a /v8/finance/spark — płaski {SYM:{close:[...]}} BEZ waluty. Obsługujemy oba,
+// preferując v7 (wcześniejszy kod wołał v8, a parsował format v7 — przez co odrzucał poprawne dane).
+function parseSpark(d){
+  const out={};
+  if(d&&d.spark&&Array.isArray(d.spark.result)){          // format v7 (opakowany, z walutą)
+    d.spark.result.forEach(r=>{
+      const meta=r.response&&r.response[0]&&r.response[0].meta;
+      const sym=(meta&&meta.symbol)||r.symbol;
+      if(meta&&meta.regularMarketPrice!=null&&sym)
+        out[sym.toUpperCase()]={price:meta.regularMarketPrice,cur:meta.currency||null};
+    });
+  }else if(d&&typeof d==="object"){                        // format v8 (płaski, bez waluty)
+    for(const [sym,v] of Object.entries(d)){
+      if(!v||typeof v!=="object")continue;
+      const closes=Array.isArray(v.close)?v.close.filter(x=>x!=null):[];
+      const price=closes.length?closes[closes.length-1]:(v.chartPreviousClose!=null?v.chartPreviousClose:null);
+      if(price!=null)out[sym.toUpperCase()]={price,cur:null};
+    }
+  }
+  return out;
+}
 async function fetchQuotesBatch(symbols){
   if(!symbols.length)return {};
-  for(const host of ["query1","query2"]){
-    try{
-      const url="https://"+host+".finance.yahoo.com/v8/finance/spark?symbols="+symbols.map(encodeURIComponent).join(",")+"&range=1d&interval=1d";
-      const d=await fetchJSON(url,x=>x&&x.spark&&Array.isArray(x.spark.result));
-      const out={};
-      d.spark.result.forEach(r=>{
-        const meta=r.response&&r.response[0]&&r.response[0].meta;
-        const sym=(meta&&meta.symbol)||r.symbol;
-        if(meta&&meta.regularMarketPrice!=null&&sym)
-          out[sym.toUpperCase()]={price:meta.regularMarketPrice,cur:meta.currency||"USD"};
-      });
-      if(Object.keys(out).length)return out;
-    }catch(e){console.warn("spark",host,e);}
+  const q="symbols="+symbols.map(encodeURIComponent).join(",")+"&range=1d&interval=1d";
+  for(const path of ["/v7/finance/spark?","/v8/finance/spark?"]){
+    for(const host of ["query1","query2"]){
+      try{
+        const d=await fetchJSON("https://"+host+".finance.yahoo.com"+path+q,x=>Object.keys(parseSpark(x)).length>0);
+        const out=parseSpark(d);
+        if(Object.keys(out).length)return out;
+      }catch(e){console.warn("spark",host,path,e);}
+    }
   }
   return {};
 }
 async function fetchFX(){
   const pairs={USD:"USDPLN",EUR:"EURPLN",GBP:"GBPPLN",CHF:"CHFPLN"};
   // 1) Yahoo (zbiorczo) — działa przez proxy/worker; stooq blokuje IP serwerów.
-  const yb=await fetchQuotesBatch(Object.keys(pairs).map(c=>c+"=X"));
-  for(const c of Object.keys(pairs)){const q=yb[(c+"=X").toUpperCase()];if(q&&q.price)fx[c]=q.price;}
+  //    Symbol Yahoo pary to np. USDPLN=X (wcześniej błędnie budowano "USD=X").
+  const yb=await fetchQuotesBatch(Object.values(pairs).map(s=>s+"=X"));
+  for(const [c,sym] of Object.entries(pairs)){const q=yb[(sym+"=X").toUpperCase()];if(q&&q.price)fx[c]=q.price;}
   // 2) Yahoo pojedynczo dla brakujących
-  for(const c of Object.keys(pairs)){if(fx[c])continue;
-    try{const s=await yahooQuote(c+"=X");if(s.price)fx[c]=s.price;}catch(e){console.warn("FX",c,e);}
+  for(const [c,sym] of Object.entries(pairs)){if(fx[c])continue;
+    try{const s=await yahooQuote(sym+"=X");if(s.price)fx[c]=s.price;}catch(e){console.warn("FX",c,e);}
   }
   // 3) stooq — best-effort (zwykle działa tylko z adresu IP przeglądarki, nie przez proxy)
   const miss=Object.keys(pairs).filter(c=>!fx[c]);
@@ -814,8 +833,11 @@ async function fetchFX(){
 // tylko best-effort dla tego, czego Yahoo nie zwróci.
 async function fetchTickers(tickers){
   const got=new Set();
+  // Waluta notowania z definicji aktywa — używana, gdy źródło (spark v8) nie podaje waluty.
+  const curOf={};S.assets.forEach(a=>{if(a.ticker)curOf[a.ticker.toUpperCase()]=a.cur||"PLN";});
   const apply=(map,src)=>{for(const [t,q] of Object.entries(map)){
-    if(q&&q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src};got.add(t.toUpperCase());}
+    if(q&&q.price!=null){const tu=t.toUpperCase();
+      prices[tu]={price:q.price,cur:q.cur||curOf[tu]||"PLN",ts:Date.now(),src};got.add(tu);}
   }};
   // 1) Yahoo spark — jedno zapytanie na wszystkie tickery
   try{apply(await fetchQuotesBatch(tickers),"Yahoo");}catch(e){console.warn("yahoo batch",e);}
