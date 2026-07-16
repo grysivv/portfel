@@ -699,17 +699,49 @@ async function yahooQuote(sym){
   }
   throw lastErr||new Error("brak danych");
 }
+// Zbiorcze pobranie notowań JEDNYM zapytaniem (endpoint spark) — dużo mniejsze ryzyko rate-limitu
+// niż osobne zapytanie na każdy ticker. Zwraca {TICKER:{price,cur}}.
+async function fetchQuotesBatch(symbols){
+  if(!symbols.length)return {};
+  for(const host of ["query1","query2"]){
+    try{
+      const url="https://"+host+".finance.yahoo.com/v8/finance/spark?symbols="+symbols.map(encodeURIComponent).join(",")+"&range=1d&interval=1d";
+      const d=await fetchJSON(url,x=>x&&x.spark&&Array.isArray(x.spark.result));
+      const out={};
+      d.spark.result.forEach(r=>{
+        const meta=r.response&&r.response[0]&&r.response[0].meta;
+        const sym=(meta&&meta.symbol)||r.symbol;
+        if(meta&&meta.regularMarketPrice!=null&&sym)
+          out[sym.toUpperCase()]={price:meta.regularMarketPrice,cur:meta.currency||"USD"};
+      });
+      if(Object.keys(out).length)return out;
+    }catch(e){console.warn("spark",host,e);}
+  }
+  return {};
+}
 async function fetchFX(){
   const pairs={USD:"USDPLN=X",EUR:"EURPLN=X",GBP:"GBPPLN=X",CHF:"CHFPLN=X"};
-  await runPool(Object.entries(pairs),async([code,sym])=>{
-    try{const q=await yahooQuote(sym);if(q.price)fx[code]=q.price;}catch(e){console.warn("FX",code,e);}
-  },3);
+  const batch=await fetchQuotesBatch(Object.values(pairs));
+  for(const [code,sym] of Object.entries(pairs)){
+    const q=batch[sym.toUpperCase()];
+    if(q&&q.price){fx[code]=q.price;continue;}
+    try{const s=await yahooQuote(sym);if(s.price)fx[code]=s.price;}catch(e){console.warn("FX",code,e);}
+  }
   fx.PLN=1;
 }
 // Zwraca liczbę nieudanych pobrań (aby pokazać, czy komplet cen się załadował).
 async function fetchTickers(tickers){
   let failed=0;
-  await runPool(tickers,async t=>{
+  // 1) jedno zbiorcze zapytanie na wszystkie tickery
+  const batch=await fetchQuotesBatch(tickers);
+  const missing=[];
+  tickers.forEach(t=>{
+    const q=batch[t.toUpperCase()];
+    if(q&&q.price!=null)prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};
+    else missing.push(t);
+  });
+  // 2) tylko brakujące — pojedynczo (fallback), z ograniczoną współbieżnością
+  await runPool(missing,async t=>{
     try{const q=await yahooQuote(t);
       if(q.price!=null)prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};
       else failed++;
