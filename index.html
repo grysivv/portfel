@@ -802,8 +802,22 @@ async function fetchTickers(tickers){
   },3);
   return tickers.length-got.size;
 }
-async function refreshPrices(){
+// Zabezpieczenie przed zbyt częstym odpytywaniem stooq/Yahoo:
+// - nie nakładamy równoległych pobrań (blokada dopóki trwa),
+// - minimalny odstęp między odświeżeniami (krótszy dla ręcznych, długi dla automatycznych).
+let _refreshing=false, _lastRefreshTs=0;
+const REFRESH_GAP_MANUAL=5000, REFRESH_GAP_AUTO=300000; // 5 s / 5 min
+async function refreshPrices(opts){
+  opts=opts||{};
   const st=document.getElementById("pricesStatus");
+  if(_refreshing){if(!opts.auto)toast("Ceny są właśnie pobierane…");return;}
+  const gap=opts.auto?REFRESH_GAP_AUTO:REFRESH_GAP_MANUAL;
+  if(Date.now()-_lastRefreshTs<gap){
+    if(!opts.auto)toast("Ceny odświeżano przed chwilą — spróbuj za moment.");
+    return;
+  }
+  _refreshing=true;
+  try{
   st.textContent="ceny: pobieram…";st.className="pill";
   await fetchFX();
   const tickers=[...new Set(S.assets.filter(a=>a.ticker).map(a=>a.ticker.toUpperCase()))];
@@ -835,6 +849,7 @@ async function refreshPrices(){
     st.title="Pobrano "+ok+" z "+total+" cen; brakujące pokazane z ostatniego zapisu. Kliknij, aby ponowić.";}
   else{st.textContent="ceny: OK • "+time;st.className="pill ok";st.title="Wszystkie ceny pobrane.";}
   renderAll();
+  }finally{_refreshing=false;_lastRefreshTs=Date.now();}
 }
 function restoreCache(){
   const c=S.priceCache;
@@ -1686,7 +1701,7 @@ $("#addTypeBtn").onclick=()=>{
   touchSettings();save();$("#newTypeName").value="";renderCustomTypes();toast("Dodano kategorię");
 };
 let autoTimer=null;
-function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=setInterval(refreshPrices,10*60*1000);}
+function setupAuto(){clearInterval(autoTimer);if(S.settings.autoRef)autoTimer=setInterval(()=>refreshPrices({auto:true}),10*60*1000);}
 
 /* ================= START ================= */
 initFirebase();
@@ -1715,7 +1730,7 @@ bindFilters();
 renderAll();
 // Nie odświeżamy cen przy każdym starcie — pokazujemy je z cache.
 // Wyjątek: pierwsze uruchomienie bez żadnych zapisanych cen, gdy są aktywa z tickerem.
-if(!Object.keys(prices).length && S.assets.some(a=>a.ticker))refreshPrices();
+if(!Object.keys(prices).length && S.assets.some(a=>a.ticker))refreshPrices({auto:true});
 setupAuto();
 </script>
 </body>
