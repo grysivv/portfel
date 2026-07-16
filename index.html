@@ -243,7 +243,9 @@ dialog h3{font-size:16px;margin-bottom:14px}
       </div>
       <table><thead><tr>
         <th>Aktywo</th><th>Typ</th><th class="r">Ilość</th><th class="r">Śr. cena zakupu</th>
-        <th class="r">Cena bieżąca</th><th class="r">Wartość</th><th class="r">Zysk/strata</th><th class="r">ROI</th><th></th>
+        <th class="r">Cena bieżąca</th><th class="r">Wartość</th><th class="r">Zysk/strata</th><th class="r">ROI</th>
+        <th class="r" title="zmiana 1 dzień">1D</th><th class="r" title="zmiana 7 dni">7D</th><th class="r" title="zmiana 1 miesiąc">1M</th><th class="r" title="zmiana 3 miesiące">3M</th><th class="r" title="zmiana od początku roku">YTD</th><th class="r" title="zmiana od początku notowań w cache">All</th>
+        <th></th>
       </tr></thead><tbody id="assetRows"></tbody></table>
       <p class="note">Źródło cen: Yahoo Finance (akcje GPW z końcówką .WA, np. PKO.WA; akcje zagraniczne, ETF-y, krypto jak BTC-USD; kursy walut). Aktywa bez notowań — złoto fizyczne, kolekcjonerskie, obrazy — wyceniasz ręcznie: kliknij „wycena”.</p>
     </section>
@@ -431,7 +433,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.24";
+const APP_VERSION="0.25";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){
@@ -901,6 +903,30 @@ function getPriceOnDate(ticker,date){
   while(lo<=hi){const mid=(lo+hi)>>1;if(data[mid].date<=date){ans=mid;lo=mid+1;}else hi=mid-1;}
   return ans>=0?data[ans].price:undefined;
 }
+// Data początku okresu (YYYY-MM-DD) dla zmiany kursu; "all" liczymy od pierwszego wpisu historii.
+function periodStart(period){
+  const d=new Date();
+  if(period==="1d")d.setDate(d.getDate()-1);
+  else if(period==="7d")d.setDate(d.getDate()-7);
+  else if(period==="1m")d.setMonth(d.getMonth()-1);
+  else if(period==="3m")d.setMonth(d.getMonth()-3);
+  else if(period==="ytd")return d.getFullYear()+"-01-01";
+  else return null;
+  return d.toISOString().slice(0,10);
+}
+// Zmiana procentowa kursu aktywa w danym okresie (na podstawie cache historycznego). null = brak danych.
+function assetChange(a,period){
+  if(!a.ticker)return null;
+  const tu=a.ticker.toUpperCase();
+  const cur=prices[tu]&&prices[tu].price;
+  if(cur==null)return null;
+  let past;
+  if(period==="all"){const h=(S.priceCache.historical||{})[tu]||[];past=h.length?h[0].price:null;}
+  else past=getPriceOnDate(tu,periodStart(period));
+  if(past==null||past===0)return null;
+  return (cur-past)/past;
+}
+const CHG_PERIODS=["1d","7d","1m","3m","ytd","all"];
 
 /* cena 1 szt. aktywa w jego walucie notowania */
 function assetPrice(a){
@@ -1113,7 +1139,7 @@ function drawChart(id,cfg){
 function renderAssets(){
   let P=positionsData(true);
   const tb=$("#assetRows");
-  if(!P.length){tb.innerHTML=`<tr><td colspan="9"><div class="empty">Brak aktywów. Dodaj pierwsze lub załaduj portfel testowy w Ustawieniach.</div></td></tr>`;return;}
+  if(!P.length){tb.innerHTML=`<tr><td colspan="15"><div class="empty">Brak aktywów. Dodaj pierwsze lub załaduj portfel testowy w Ustawieniach.</div></td></tr>`;return;}
   const types=getTypes();
   const q=(($("#assetSearch")||{}).value||"").trim().toLowerCase();
   const tf=($("#assetTypeFilter")||{}).value||"";
@@ -1130,7 +1156,7 @@ function renderAssets(){
     default:return p.a.name.toLowerCase();
   }};
   P.sort((a,b)=>{const x=key(a),y=key(b);return (typeof x==="string"?x.localeCompare(y):x-y)*dir;});
-  if(!P.length){tb.innerHTML=`<tr><td colspan="9"><div class="empty">Brak aktywów spełniających kryteria.</div></td></tr>`;return;}
+  if(!P.length){tb.innerHTML=`<tr><td colspan="15"><div class="empty">Brak aktywów spełniających kryteria.</div></td></tr>`;return;}
   tb.innerHTML=P.map(p=>{
     const a=p.a;
     const empty=p.qty<=1e-9;
@@ -1143,6 +1169,7 @@ function renderAssets(){
       <td class="r num"><b>${empty?`<span class="src">dodaj transakcję kupna</span>`:(p.val!=null?fmt(p.val):"—")}</b></td>
       <td class="r num ${p.gain!=null&&p.gain>=0?"pos":"neg"}">${!empty&&p.gain!=null?fmt(p.gain):"—"}</td>
       <td class="r num ${p.roi!=null&&p.roi>=0?"pos":"neg"}">${empty?"—":pct(p.roi)}</td>
+      ${CHG_PERIODS.map(pr=>{const c=assetChange(a,pr);return `<td class="r num ${c==null?"":(c>=0?"pos":"neg")}">${c==null?"—":pct(c)}</td>`;}).join("")}
       <td class="r">
         <button class="rowbtn" onclick="editAsset('${a.id}')">edytuj</button>
         <button class="rowbtn" onclick="quickPrice('${a.id}')">wycena</button>
