@@ -368,7 +368,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
             <button class="btn" id="proxySave">Zapisz</button>
             <button class="btn" id="proxyTest">Testuj</button>
           </div>
-          <p class="note">Darmowe publiczne proxy CORS bywają niedostępne — wtedy ceny się nie pobierają. Własny <b>Cloudflare Worker</b> (darmowy) rozwiązuje to na stałe: pobiera ceny ze stooq/Yahoo po stronie serwera i zwraca je z nagłówkami CORS. Kod workera i instrukcja: plik <code>cloudflare-worker.js</code> w repozytorium. Po wdrożeniu wklej tutaj adres <code>…workers.dev</code> — będzie używany w pierwszej kolejności, a publiczne proxy zostaną jako zapas.</p>
+          <p class="note">Darmowe publiczne proxy CORS bywają niedostępne — wtedy ceny się nie pobierają. Własne proxy rozwiązuje to na stałe (pobiera ceny ze stooq/Yahoo po stronie serwera i zwraca z nagłówkami CORS). Dwie opcje w repozytorium: <b>Cloudflare Worker</b> — <code>cloudflare-worker.js</code> (darmowy, bez karty), albo <b>Firebase Cloud Function</b> — katalog <code>firebase-price-proxy/</code> (w tym samym projekcie co logowanie; wymaga planu Blaze). Po wdrożeniu wklej tutaj adres — będzie używany w pierwszej kolejności, a publiczne proxy zostaną jako zapas.</p>
         </div>
         <h3 style="margin:18px 0 12px">Chmura</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -431,7 +431,7 @@ dialog h3{font-size:16px;margin-bottom:14px}
 <div id="toast"></div>
 <script>
 "use strict";
-const APP_VERSION="0.18";
+const APP_VERSION="0.19";
 /* ================= FIREBASE ================= */
 let firestore=null, auth=null, currentUser=null, syncListener=null;
 function initFirebase(){

@@ -1,0 +1,12 @@
+{
+  "name": "portfel-price-proxy",
+  "description": "Serwer cen (proxy stooq/Yahoo) dla aplikacji Portfel",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-functions": "^5.0.0"
+  },
+  "private": true
+}
