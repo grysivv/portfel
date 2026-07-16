@@ -792,41 +792,42 @@ async function fetchQuotesBatch(symbols){
 }
 async function fetchFX(){
   const pairs={USD:"USDPLN",EUR:"EURPLN",GBP:"GBPPLN",CHF:"CHFPLN"};
-  // 1) stooq — jedno zapytanie na wszystkie pary
-  try{
-    const url="https://stooq.com/q/l/?s="+Object.values(pairs).map(s=>s.toLowerCase()).join(",")+"&f=sd2t2ohlcv&h&e=csv";
-    const csv=await fetchTextVia(url,looksLikeStooqCSV);
-    const by=parseStooqCSV(csv);
-    for(const [code,sym] of Object.entries(pairs)){const p=by[sym];if(p)fx[code]=p;}
-  }catch(e){console.warn("FX stooq",e);}
-  // 2) brakujące pary — Yahoo (zbiorczo, potem pojedynczo)
-  let miss=Object.keys(pairs).filter(c=>!fx[c]);
-  if(miss.length){
-    const yb=await fetchQuotesBatch(miss.map(c=>c+"=X"));
-    miss.forEach(c=>{const q=yb[(c+"=X").toUpperCase()];if(q&&q.price)fx[c]=q.price;});
-  }
+  // 1) Yahoo (zbiorczo) — działa przez proxy/worker; stooq blokuje IP serwerów.
+  const yb=await fetchQuotesBatch(Object.keys(pairs).map(c=>c+"=X"));
+  for(const c of Object.keys(pairs)){const q=yb[(c+"=X").toUpperCase()];if(q&&q.price)fx[c]=q.price;}
+  // 2) Yahoo pojedynczo dla brakujących
   for(const c of Object.keys(pairs)){if(fx[c])continue;
     try{const s=await yahooQuote(c+"=X");if(s.price)fx[c]=s.price;}catch(e){console.warn("FX",c,e);}
   }
+  // 3) stooq — best-effort (zwykle działa tylko z adresu IP przeglądarki, nie przez proxy)
+  const miss=Object.keys(pairs).filter(c=>!fx[c]);
+  if(miss.length){try{
+    const url="https://stooq.com/q/l/?s="+miss.map(c=>pairs[c].toLowerCase()).join(",")+"&f=sd2t2ohlcv&h&e=csv";
+    const by=parseStooqCSV(await fetchTextVia(url,looksLikeStooqCSV));
+    miss.forEach(c=>{const p=by[pairs[c]];if(p)fx[c]=p;});
+  }catch(e){console.warn("FX stooq",e);}}
   fx.PLN=1;
 }
 // Zwraca liczbę nieudanych pobrań (aby pokazać, czy komplet cen się załadował).
+// Kolejność: Yahoo (przez proxy/worker) jako główne źródło — obsługuje GPW .WA, akcje US,
+// krypto i waluty. Stooq blokuje adresy IP serwerów (proxy/worker dostają 404), więc jest
+// tylko best-effort dla tego, czego Yahoo nie zwróci.
 async function fetchTickers(tickers){
   const got=new Set();
   const apply=(map,src)=>{for(const [t,q] of Object.entries(map)){
     if(q&&q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src};got.add(t.toUpperCase());}
   }};
-  // 1) stooq — najlepsze dla GPW (i akcji US), jednym zapytaniem
-  try{apply(await fetchStooqBatch(tickers),"Stooq");}catch(e){console.warn("stooq",e);}
-  // 2) Yahoo (spark) zbiorczo dla brakujących (krypto, inne giełdy itp.)
+  // 1) Yahoo spark — jedno zapytanie na wszystkie tickery
+  try{apply(await fetchQuotesBatch(tickers),"Yahoo");}catch(e){console.warn("yahoo batch",e);}
+  // 2) Yahoo pojedynczo dla brakujących
   let rest=tickers.filter(t=>!got.has(t.toUpperCase()));
-  if(rest.length){try{apply(await fetchQuotesBatch(rest),"Yahoo");}catch(e){console.warn("yahoo batch",e);}}
-  // 3) Yahoo pojedynczo dla wciąż brakujących
-  rest=tickers.filter(t=>!got.has(t.toUpperCase()));
   await runPool(rest,async t=>{
     try{const q=await yahooQuote(t);if(q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};got.add(t.toUpperCase());}}
     catch(e){console.warn("Yahoo",t,e);}
   },3);
+  // 3) stooq — best-effort dla wciąż brakujących
+  rest=tickers.filter(t=>!got.has(t.toUpperCase()));
+  if(rest.length){try{apply(await fetchStooqBatch(rest),"Stooq");}catch(e){console.warn("stooq",e);}}
   return tickers.length-got.size;
 }
 // Zabezpieczenie przed zbyt częstym odpytywaniem stooq/Yahoo:
