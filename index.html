@@ -658,10 +658,9 @@ const JSON_SOURCES=[
   {name:"corsproxy",  make:u=>"https://corsproxy.io/?url="+encodeURIComponent(u)},
   {name:"thingproxy", make:u=>"https://thingproxy.freeboard.io/fetch/"+u}
 ];
-// Pobiera JSON próbując kolejnych źródeł. Akceptuje odpowiedź TYLKO gdy parsuje się do JSON
-// i przechodzi walidację — dzięki temu proxy zwracające własną stronę HTML jest odrzucane
-// i próbujemy następnego (wcześniej taka „odpowiedź” była błędnie uznawana za sukces).
-async function fetchJSON(url,validate){
+// Pobiera surową treść (tekst) próbując kolejnych źródeł; akceptuje TYLKO gdy przejdzie walidator.
+// Dzięki temu strona HTML proxy / błędu jest odrzucana i próbujemy następnego źródła.
+async function fetchTextVia(url,validate){
   let lastErr;
   for(const src of JSON_SOURCES){
     try{
@@ -670,14 +669,59 @@ async function fetchJSON(url,validate){
       let body=await r.text();
       if(!body||!body.trim())throw new Error("pusta odpowiedź");
       if(src.extract)body=src.extract(body);
-      const data=JSON.parse(body);
-      if(validate&&!validate(data))throw new Error("nieoczekiwana treść ("+src.name+")");
-      return data;
+      if(validate&&!validate(body))throw new Error("nieoczekiwana treść ("+src.name+")");
+      return body;
     }catch(e){lastErr=e;}
   }
   throw lastErr||new Error("wszystkie źródła zawiodły");
 }
+// JSON: pobierz tekst przez fetchTextVia i sparsuj (walidator działa na sparsowanym obiekcie).
+async function fetchJSON(url,validate){
+  const txt=await fetchTextVia(url,t=>{try{const d=JSON.parse(t);return !validate||validate(d);}catch(_){return false;}});
+  return JSON.parse(txt);
+}
 const isChart=d=>d&&d.chart&&d.chart.result&&d.chart.result[0];
+
+/* ===== Stooq — dobre źródło dla GPW (i akcji US/walut). Format CSV. ===== */
+// Mapuje nasz ticker (styl Yahoo) na symbol stooq + walutę notowania. null = zostaw dla Yahoo.
+function toStooqSymbol(t){
+  const u=t.toUpperCase();
+  if(u.endsWith(".WA"))return {sym:u.slice(0,-3).toLowerCase(),cur:"PLN"};      // GPW: PKO.WA -> pko
+  if(u.endsWith("=X"))return null;                                              // waluty — osobno
+  if(u.includes("-"))return null;                                               // krypto (BTC-USD) -> Yahoo
+  if(u.includes("."))return null;                                               // inne giełdy -> Yahoo
+  if(/^[A-Z]{1,6}$/.test(u))return {sym:u.toLowerCase()+".us",cur:"USD"};       // akcje US: AAPL -> aapl.us
+  return null;
+}
+// Parsuje CSV stooq (nagłówek z kolumnami Symbol/Close) -> {SYMBOL_UPPER: close}.
+function parseStooqCSV(text){
+  const lines=text.trim().split(/\r?\n/);if(lines.length<2)return {};
+  const head=lines[0].toLowerCase().split(","),si=head.indexOf("symbol"),ci=head.indexOf("close");
+  if(ci<0)return {};
+  const out={};
+  for(let i=1;i<lines.length;i++){
+    const c=lines[i].split(",");
+    const sym=(si>=0?c[si]:"").trim().toUpperCase(), close=parseFloat(c[ci]);
+    if(sym&&isFinite(close))out[sym]=close;
+  }
+  return out;
+}
+const looksLikeStooqCSV=t=>/symbol/i.test(t)&&/close/i.test(t)&&!/does not exist/i.test(t);
+// Zbiorczo pobiera notowania ze stooq JEDNYM zapytaniem. Zwraca {TICKER:{price,cur}}.
+async function fetchStooqBatch(tickers){
+  const map={}; // ticker -> {stooq,cur}
+  tickers.forEach(t=>{const st=toStooqSymbol(t);if(st)map[t.toUpperCase()]={stooq:st.sym,cur:st.cur};});
+  const syms=[...new Set(Object.values(map).map(m=>m.stooq))];
+  if(!syms.length)return {};
+  const url="https://stooq.com/q/l/?s="+syms.join(",")+"&f=sd2t2ohlcv&h&e=csv";
+  let csv;
+  try{csv=await fetchTextVia(url,looksLikeStooqCSV);}catch(e){console.warn("stooq batch",e);return {};}
+  const by=parseStooqCSV(csv);
+  const out={};
+  for(const [tk,m] of Object.entries(map)){const p=by[m.stooq.toUpperCase()];if(p!=null)out[tk]={price:p,cur:m.cur};}
+  return out;
+}
+
 // Uruchamia zadania z ograniczoną współbieżnością, aby nie przeciążać proxy (rate-limit).
 async function runPool(items,worker,limit){
   const arr=[...items];let i=0;
@@ -720,34 +764,43 @@ async function fetchQuotesBatch(symbols){
   return {};
 }
 async function fetchFX(){
-  const pairs={USD:"USDPLN=X",EUR:"EURPLN=X",GBP:"GBPPLN=X",CHF:"CHFPLN=X"};
-  const batch=await fetchQuotesBatch(Object.values(pairs));
-  for(const [code,sym] of Object.entries(pairs)){
-    const q=batch[sym.toUpperCase()];
-    if(q&&q.price){fx[code]=q.price;continue;}
-    try{const s=await yahooQuote(sym);if(s.price)fx[code]=s.price;}catch(e){console.warn("FX",code,e);}
+  const pairs={USD:"USDPLN",EUR:"EURPLN",GBP:"GBPPLN",CHF:"CHFPLN"};
+  // 1) stooq — jedno zapytanie na wszystkie pary
+  try{
+    const url="https://stooq.com/q/l/?s="+Object.values(pairs).map(s=>s.toLowerCase()).join(",")+"&f=sd2t2ohlcv&h&e=csv";
+    const csv=await fetchTextVia(url,looksLikeStooqCSV);
+    const by=parseStooqCSV(csv);
+    for(const [code,sym] of Object.entries(pairs)){const p=by[sym];if(p)fx[code]=p;}
+  }catch(e){console.warn("FX stooq",e);}
+  // 2) brakujące pary — Yahoo (zbiorczo, potem pojedynczo)
+  let miss=Object.keys(pairs).filter(c=>!fx[c]);
+  if(miss.length){
+    const yb=await fetchQuotesBatch(miss.map(c=>c+"=X"));
+    miss.forEach(c=>{const q=yb[(c+"=X").toUpperCase()];if(q&&q.price)fx[c]=q.price;});
+  }
+  for(const c of Object.keys(pairs)){if(fx[c])continue;
+    try{const s=await yahooQuote(c+"=X");if(s.price)fx[c]=s.price;}catch(e){console.warn("FX",c,e);}
   }
   fx.PLN=1;
 }
 // Zwraca liczbę nieudanych pobrań (aby pokazać, czy komplet cen się załadował).
 async function fetchTickers(tickers){
-  let failed=0;
-  // 1) jedno zbiorcze zapytanie na wszystkie tickery
-  const batch=await fetchQuotesBatch(tickers);
-  const missing=[];
-  tickers.forEach(t=>{
-    const q=batch[t.toUpperCase()];
-    if(q&&q.price!=null)prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};
-    else missing.push(t);
-  });
-  // 2) tylko brakujące — pojedynczo (fallback), z ograniczoną współbieżnością
-  await runPool(missing,async t=>{
-    try{const q=await yahooQuote(t);
-      if(q.price!=null)prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};
-      else failed++;
-    }catch(e){failed++;console.warn("Yahoo",t,e);}
+  const got=new Set();
+  const apply=(map,src)=>{for(const [t,q] of Object.entries(map)){
+    if(q&&q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src};got.add(t.toUpperCase());}
+  }};
+  // 1) stooq — najlepsze dla GPW (i akcji US), jednym zapytaniem
+  try{apply(await fetchStooqBatch(tickers),"Stooq");}catch(e){console.warn("stooq",e);}
+  // 2) Yahoo (spark) zbiorczo dla brakujących (krypto, inne giełdy itp.)
+  let rest=tickers.filter(t=>!got.has(t.toUpperCase()));
+  if(rest.length){try{apply(await fetchQuotesBatch(rest),"Yahoo");}catch(e){console.warn("yahoo batch",e);}}
+  // 3) Yahoo pojedynczo dla wciąż brakujących
+  rest=tickers.filter(t=>!got.has(t.toUpperCase()));
+  await runPool(rest,async t=>{
+    try{const q=await yahooQuote(t);if(q.price!=null){prices[t.toUpperCase()]={price:q.price,cur:q.cur,ts:Date.now(),src:"Yahoo"};got.add(t.toUpperCase());}}
+    catch(e){console.warn("Yahoo",t,e);}
   },3);
-  return failed;
+  return tickers.length-got.size;
 }
 async function refreshPrices(){
   const st=document.getElementById("pricesStatus");
