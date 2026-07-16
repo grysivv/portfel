@@ -660,13 +660,21 @@ const JSON_SOURCES=[
   {name:"corsproxy",  make:u=>"https://corsproxy.io/?url="+encodeURIComponent(u)},
   {name:"thingproxy", make:u=>"https://thingproxy.freeboard.io/fetch/"+u}
 ];
+// fetch z twardym limitem czasu — bez tego martwe/wolne proxy potrafi „zawiesić” całe pobieranie
+// (a wtedy blokada równoległych odświeżeń nigdy się nie zdejmuje i ceny przestają się aktualizować).
+async function fetchTimed(url,ms){
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),ms||8000);
+  try{return await fetch(url,{signal:ctl.signal});}
+  finally{clearTimeout(timer);}
+}
 // Pobiera surową treść (tekst) próbując kolejnych źródeł; akceptuje TYLKO gdy przejdzie walidator.
 // Dzięki temu strona HTML proxy / błędu jest odrzucana i próbujemy następnego źródła.
 async function fetchTextVia(url,validate){
   let lastErr;
   for(const src of JSON_SOURCES){
     try{
-      const r=await fetch(src.make(url));
+      const r=await fetchTimed(src.make(url),8000);
       if(!r.ok)throw new Error("HTTP "+r.status);
       let body=await r.text();
       if(!body||!body.trim())throw new Error("pusta odpowiedź");
@@ -807,18 +815,19 @@ async function fetchTickers(tickers){
 // Zabezpieczenie przed zbyt częstym odpytywaniem stooq/Yahoo:
 // - nie nakładamy równoległych pobrań (blokada dopóki trwa),
 // - minimalny odstęp między odświeżeniami (krótszy dla ręcznych, długi dla automatycznych).
-let _refreshing=false, _lastRefreshTs=0;
+let _refreshing=false, _lastRefreshTs=0, _refreshStartTs=0;
 const REFRESH_GAP_MANUAL=5000, REFRESH_GAP_AUTO=300000; // 5 s / 5 min
 async function refreshPrices(opts){
   opts=opts||{};
   const st=document.getElementById("pricesStatus");
-  if(_refreshing){if(!opts.auto)toast("Ceny są właśnie pobierane…");return;}
+  // Zabezpieczenie: jeśli poprzednie pobranie „utknęło” na >90 s, i tak pozwól odświeżyć.
+  if(_refreshing&&Date.now()-_refreshStartTs<90000){if(!opts.auto)toast("Ceny są właśnie pobierane…");return;}
   const gap=opts.auto?REFRESH_GAP_AUTO:REFRESH_GAP_MANUAL;
   if(Date.now()-_lastRefreshTs<gap){
     if(!opts.auto)toast("Ceny odświeżano przed chwilą — spróbuj za moment.");
     return;
   }
-  _refreshing=true;
+  _refreshing=true;_refreshStartTs=Date.now();
   try{
   st.textContent="ceny: pobieram…";st.className="pill";
   await fetchFX();
